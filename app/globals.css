@@ -1,26 +1,73 @@
-@import "tailwindcss";
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+*{background-color: black;}
+.hero {
+  min-height: 680px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 90px;
+  padding-bottom: 100px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+.eyebrow {
+  color: #39ff14;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+.hero h1 {
+  max-width: 1000px;
+  margin: 20px 0;
+  font-size: clamp(3.2rem, 7vw, 6.5rem);
+  line-height: 1.04;
+  letter-spacing: -0.065em;
+}
+
+.hero h1 span {
+  color: #39ff14;
+}
+
+.hero-copy {
+  max-width: 600px;
+  color: #aab2ac;
+  font-size: 1.1rem;
+  line-height: 1.8;
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin-top: 24px;
+}
+
+.hero-button {
+  padding: 13px 18px;
+  background: #39ff14;
+  color: #071006;
+  font-weight: 700;
+  border-radius: 4px;
+}
+
+.hero-secondary {
+  color: #f5f7f5;
+}
+
+@media (max-width: 600px) {
+  .hero {
+    min-height: 580px;
+    padding-top: 70px;
+    padding-bottom: 70px;
   }
-}
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  .hero h1 {
+    font-size: clamp(2.8rem, 12vw, 4.5rem);
+  }
+
+  .hero-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
 }
