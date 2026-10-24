@@ -14,6 +14,9 @@ const HOLD_DISTANCE = 600 // px of wheel/touch input AFTER the circle is fully o
 const TOTAL_SCROLL = SCROLL_DISTANCE + HOLD_DISTANCE + ZOOM_DISTANCE
 const TILT = 10 // degrees, top leans away from the viewer (negative = other way)
 
+// SIZE OF THE BIG CENTER CIRCLE (px) - change this one number to resize it
+const CENTER_SIZE = 340
+
 // 3D tile settings
 const TILE_DEPTH = 0.01 // slab thickness
 const TILE_BEVEL = 0.02 // edge bevel size
@@ -29,7 +32,10 @@ const VIEW_ANGLES = [200, 105, 68]
 
 const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 
-// Optional image that fills the big center circle (falls back to the dark gradient if empty/missing)
+// Video that fills the big center circle (put your file in /public/videos/)
+const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
+
+// Optional poster shown until the video loads (falls back to the dark gradient if empty/missing)
 const DEFAULT_CENTER_IMAGE = "/images/sample1.png"
 
 const PROFILES = [
@@ -137,10 +143,58 @@ function roundedRectShape(w: number, h: number, r: number) {
   return s
 }
 
+// Navbar-style neon for the orbit tiles: a soft outer glow sprite and an inner edge glow overlay
+function useGlowTextures() {
+  return useMemo(() => {
+    const rr = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
+      ctx.beginPath()
+      ctx.moveTo(x + r, y)
+      ctx.arcTo(x + w, y, x + w, y + h, r)
+      ctx.arcTo(x + w, y + h, x, y + h, r)
+      ctx.arcTo(x, y + h, x, y, r)
+      ctx.arcTo(x, y, x + w, y, r)
+      ctx.closePath()
+    }
+
+    // outer glow (drawn on a plane 2x the tile size, tile occupies the middle 50%)
+    const S = 256
+    const outer = document.createElement("canvas")
+    outer.width = outer.height = S
+    const o = outer.getContext("2d")!
+    o.shadowColor = "rgba(0,110,255,1)"
+    o.shadowBlur = 55
+    o.fillStyle = "rgba(0,110,255,1)"
+    rr(o, S * 0.25, S * 0.25, S * 0.5, S * 0.5, 8)
+    o.fill()
+
+    // inner glow (transparent centre, blue edges, laid over the image face)
+    const inner = document.createElement("canvas")
+    inner.width = inner.height = S
+    const n = inner.getContext("2d")!
+    n.save()
+    rr(n, 0, 0, S, S, 4)
+    n.clip()
+    n.shadowColor = "rgba(0,110,255,0.9)"
+    n.shadowBlur = 38
+    n.fillStyle = "#000"
+    n.beginPath()
+    n.rect(-200, -200, S + 400, S + 400)
+    rr(n, 0, 0, S, S, 4)
+    n.fill("evenodd")
+    n.restore()
+
+    const outerTex = new THREE.CanvasTexture(outer)
+    const innerTex = new THREE.CanvasTexture(inner)
+    outerTex.colorSpace = innerTex.colorSpace = THREE.SRGBColorSpace
+    return { outerTex, innerTex }
+  }, [])
+}
+
 function HeroImages({ images }: { images: string[] }) {
   const textures = useTexture(images)
+  const { outerTex, innerTex } = useGlowTextures()
 
-  const { bodyGeo, faceGeo } = useMemo(() => {
+  const { bodyGeo, faceGeo, glowGeo } = useMemo(() => {
     // thick beveled slab
     const bodySize = IMAGE_SIZE - TILE_BEVEL * 2
     const bodyGeo = new THREE.ExtrudeGeometry(roundedRectShape(bodySize, bodySize, TILE_RADIUS), {
@@ -165,7 +219,9 @@ function HeroImages({ images }: { images: string[] }) {
       uv.setXY(i, pos.getX(i) / faceSize + 0.5, pos.getY(i) / faceSize + 0.5)
     }
     uv.needsUpdate = true
-    return { bodyGeo, faceGeo }
+
+    const glowGeo = new THREE.PlaneGeometry(IMAGE_SIZE * 2, IMAGE_SIZE * 2)
+    return { bodyGeo, faceGeo, glowGeo }
   }, [])
 
   const half = TILE_DEPTH / 2 + TILE_BEVEL + 0.002
@@ -180,22 +236,58 @@ function HeroImages({ images }: { images: string[] }) {
             position={[RADIUS * Math.cos(a), 0, RADIUS * Math.sin(a)]}
             rotation={[0, Math.PI / 2 - a, 0]}
           >
+            {/* outer neon glow (sits inside the slab, so only the part past the edges shows) */}
+            <mesh geometry={glowGeo}>
+              <meshBasicMaterial
+                map={outerTex}
+                transparent
+                opacity={0.7}
+                depthWrite={false}
+                blending={THREE.AdditiveBlending}
+                side={THREE.DoubleSide}
+                toneMapped={false}
+              />
+            </mesh>
+
+            {/* neon rim: the bevel edge around the image */}
             <mesh geometry={bodyGeo}>
               <meshStandardMaterial
                 color="#0b0e16"
-                metalness={0.85}
-                roughness={0.28}
-                emissive="#0a2a9a"
-                emissiveIntensity={0.18}
+                metalness={0.4}
+                roughness={0.4}
+                emissive="#006eff"
+                emissiveIntensity={1.1}
               />
             </mesh>
+
             {/* front */}
             <mesh geometry={faceGeo} position={[0, 0, half]}>
               <meshBasicMaterial map={map} toneMapped={false} />
             </mesh>
+            {/* front inner glow */}
+            <mesh geometry={faceGeo} position={[0, 0, half + 0.001]}>
+              <meshBasicMaterial
+                map={innerTex}
+                transparent
+                depthWrite={false}
+                blending={THREE.AdditiveBlending}
+                toneMapped={false}
+              />
+            </mesh>
+
             {/* back (so tiles on the far side still show the image) */}
             <mesh geometry={faceGeo} position={[0, 0, -half]} rotation={[0, Math.PI, 0]}>
               <meshBasicMaterial map={map} toneMapped={false} />
+            </mesh>
+            {/* back inner glow */}
+            <mesh geometry={faceGeo} position={[0, 0, -half - 0.001]} rotation={[0, Math.PI, 0]}>
+              <meshBasicMaterial
+                map={innerTex}
+                transparent
+                depthWrite={false}
+                blending={THREE.AdditiveBlending}
+                toneMapped={false}
+              />
             </mesh>
           </group>
         )
@@ -267,7 +359,15 @@ function HeroScrollAnimation({ progress }: { progress: React.MutableRefObject<nu
 }
 
 // Center section that sits inside the orbit (inline styles, no Tailwind needed)
-function HeroCenter({ scrollY, centerImage }: { scrollY: number; centerImage?: string }) {
+function HeroCenter({
+  scrollY,
+  centerImage,
+  centerVideo,
+}: {
+  scrollY: number
+  centerImage?: string
+  centerVideo?: string
+}) {
   const [scale, setScale] = useState(1)
   const [vp, setVp] = useState({ w: 1920, h: 1080 })
 
@@ -286,12 +386,16 @@ function HeroCenter({ scrollY, centerImage }: { scrollY: number; centerImage?: s
   const zoom = Math.min(Math.max((scrollY - SCROLL_DISTANCE - HOLD_DISTANCE) / ZOOM_DISTANCE, 0), 1)
   // the circle morphs into a full-screen landscape rectangle (size + corner radius, no scaling)
   const ease = zoom * zoom * (3 - 2 * zoom)
-  const curW = 400 + (vp.w / scale + 4 - 400) * ease
-  const curH = 400 + (vp.h / scale + 4 - 400) * ease
+  const curW = CENTER_SIZE + (vp.w / scale + 4 - CENTER_SIZE) * ease
+  const curH = CENTER_SIZE + (vp.h / scale + 4 - CENTER_SIZE) * ease
   const radius = (Math.min(curW, curH) / 2) * (1 - ease)
   // rings, small images and text fade out as the zoom starts
   const fade = 1 - Math.min(zoom * 3, 1)
   const center: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "center" }
+
+  // same neon glow as the navbar (outer glow, wide ambient glow, inner glow, bright inner top edge)
+  const neon = (k: number) =>
+    `0 0 25px rgba(0,110,255,${0.5 * k}), 0 0 60px rgba(0,110,255,${0.15 * k}), inset 0 0 30px rgba(0,110,255,${0.25 * k}), inset 0 2px 8px rgba(0,110,255,${0.4 * k})`
 
   const circleGradient =
     "radial-gradient(circle at 50% 35%, rgba(10,26,92,0.92) 0%, rgba(5,11,42,0.94) 60%, rgba(2,4,15,0.96) 100%)"
@@ -314,7 +418,8 @@ function HeroCenter({ scrollY, centerImage }: { scrollY: number; centerImage?: s
             width: 600,
             height: 600,
             borderRadius: "50%",
-           border: scrollY > SCROLL_DISTANCE * 0.6 ? `2px solid rgba(120,160,255,${0.25 * fade})` : "2px solid transparent",
+            border: scrollY > SCROLL_DISTANCE * 0.6 ? `2px solid rgba(0,110,255,${0.9 * fade})` : "2px solid transparent",
+            boxShadow: scrollY > SCROLL_DISTANCE * 0.6 ? neon(fade) : "none",
             transition: "all 0.5s",
           }}
         >
@@ -325,8 +430,8 @@ function HeroCenter({ scrollY, centerImage }: { scrollY: number; centerImage?: s
               width: 500,
               height: 500,
               borderRadius: "50%",
-             border: scrollY > SCROLL_DISTANCE * 0.2 ? `2px solid rgba(60,110,255,${0.55 * fade})` : "2px solid transparent",
-boxShadow: scrollY > SCROLL_DISTANCE * 0.2 ? `0 0 40px rgba(30,80,255,${0.25 * fade})` : "none",
+              border: scrollY > SCROLL_DISTANCE * 0.2 ? `2px solid rgba(0,110,255,${0.9 * fade})` : "2px solid transparent",
+              boxShadow: scrollY > SCROLL_DISTANCE * 0.2 ? neon(fade) : "none",
               transition: "all 0.5s",
             }}
           >
@@ -340,7 +445,7 @@ boxShadow: scrollY > SCROLL_DISTANCE * 0.2 ? `0 0 40px rgba(30,80,255,${0.25 * f
                 borderRadius: radius,
                 padding: 2 * (1 - ease),
                 background: "linear-gradient(135deg, #7aa7ff, #2f5bff, #4a2fd6)",
-boxShadow: `0 0 ${70 * fade}px rgba(30,80,255,${0.45 * fade})`,
+                boxShadow: neon(fade),
               }}
             >
               <div
@@ -350,12 +455,38 @@ boxShadow: `0 0 ${70 * fade}px rgba(30,80,255,${0.45 * fade})`,
                   width: "100%",
                   height: "100%",
                   borderRadius: radius,
-                  // image on top, gradient underneath as a fallback
-                  background: centerImage
-                    ? `url("${centerImage}") center / cover no-repeat, ${circleGradient}`
-                    : circleGradient,
+                  // gradient underneath as a fallback while the video loads
+                  background: circleGradient,
                 }}
               >
+                {/* video fills the whole circle */}
+                {centerVideo && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      borderRadius: radius,
+                      overflow: "hidden", // clips only the video, not the profile cards
+                    }}
+                  >
+                    <video
+                      src={centerVideo}
+                      poster={centerImage || undefined}
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      preload="auto"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        display: "block",
+                      }}
+                    />
+                  </div>
+                )}
+
                 {PROFILES.map((src, i) => {
                   const angle = (i * Math.PI) / 4
                   return (
@@ -368,7 +499,9 @@ boxShadow: `0 0 ${70 * fade}px rgba(30,80,255,${0.45 * fade})`,
                         borderRadius: 16,
                         overflow: "hidden",
                         border: "4px solid #1f2937",
-                        boxShadow: "0 10px 15px rgba(0,0,0,0.4)",
+                        // white glow (outer layers only; inset layers would be hidden under the image)
+                        boxShadow:
+                          "0 0 8px rgba(255,255,255,0.6), 0 0 25px rgba(255,255,255,0.5), 0 0 60px rgba(255,255,255,0.15)",
                         opacity: fade,
                         transition: "transform 0.3s ease-out",
                         transform: `translate(${expandRadius * Math.cos(angle)}px, ${expandRadius * Math.sin(angle)}px)`,
@@ -394,11 +527,11 @@ boxShadow: `0 0 ${70 * fade}px rgba(30,80,255,${0.45 * fade})`,
                     transition: "opacity 0.5s",
                   }}
                 >
-                  <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 8px" }}>Empowering</h1>
-                  <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 16px" }}>Every User</h1>
-                  <p style={{ maxWidth: 320, color: "#9ca3af", margin: 0 }}>
+                  {/* <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 8px" }}>Empowering</h1> */}
+                  {/* <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 16px" }}>Every User</h1> */}
+                  {/* <p style={{ maxWidth: 320, color: "#9ca3af", margin: 0 }}>
                     From entrepreneurs to educators, Gen AI provides tools to simplify work.
-                  </p>
+                  </p> */}
                 </div>
               </div>
             </div>
@@ -412,9 +545,11 @@ boxShadow: `0 0 ${70 * fade}px rgba(30,80,255,${0.45 * fade})`,
 export default function Hero({
   images = DEFAULT_HERO_IMAGES,
   centerImage = DEFAULT_CENTER_IMAGE,
+  centerVideo = DEFAULT_CENTER_VIDEO,
 }: {
   images?: string[]
   centerImage?: string
+  centerVideo?: string
 }) {
   const ref = useRef<HTMLElement>(null)
   const progress = useRef(0)
@@ -566,7 +701,7 @@ export default function Hero({
         />
       </Canvas>
 
-      <HeroCenter scrollY={scrollY} centerImage={centerImage} />
+      <HeroCenter scrollY={scrollY} centerImage={centerImage} centerVideo={centerVideo} />
     </section>
   )
 }
