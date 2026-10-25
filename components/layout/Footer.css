@@ -12,10 +12,10 @@
   --sf-bg-position:center;
   --sf-bg-size:cover;
   --sf-overlay:.1;
-  --sf-min-height:90vh; /* 90vh–100vh, your choice */
+  --sf-min-height:70vh; /* 90vh–100vh, your choice */
 
   font-size:clamp(11px,.88vw,19px);
-  aspect-ratio:1478/741;
+  aspect-ratio:1408/700;
   min-height:var(--sf-min-height);
   display:grid;grid-template-rows:1fr auto auto;
   position:relative;isolation:isolate;overflow:hidden;

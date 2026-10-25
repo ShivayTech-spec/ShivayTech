@@ -336,7 +336,7 @@ const StepImage = forwardRef<HTMLImageElement, StepImageProps>(
 )
 StepImage.displayName = "StepImage"
 
-const MotionStepImage = motion(StepImage)
+const MotionStepImage = motion.create(StepImage)
 
 const AnimatedStepImage = ({ preset = "fadeInScale", delay = 0, ...props }: AnimatedStepImageProps) => {
   const presetConfig = ANIMATION_PRESETS[preset]

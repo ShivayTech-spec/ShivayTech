@@ -28,7 +28,7 @@ const USER_PAUSE = 4000 // ms after the user lets go before auto-change can happ
 // Camera polar angle in degrees (0 = straight down, 90 = level, 180 = straight up), in order:
 // 1) from far below looking almost straight up (near side on top),
 // 2) almost top-down (ring face-on), 3) from above (near side at the bottom)
-const VIEW_ANGLES = [200, 105, 68]
+const VIEW_ANGLES = [68, 105, 200]
 
 const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 

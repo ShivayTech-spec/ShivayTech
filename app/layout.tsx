@@ -23,7 +23,7 @@ export default function RootLayout({
       <body>
         <Navbar />
         <main>{children}</main>
-        <Footer backgroundImage="/images/footer.png" />
+        <Footer backgroundImage="/images/Footers.png" />
       </body>
     </html>
   );
