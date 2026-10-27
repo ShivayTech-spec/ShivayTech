@@ -9,7 +9,7 @@ export default function HomePage() {
   return (
     <>
       <section className="orbit-section">
-       <Orbit centerVideo="/videos/hero.mp4" />
+       <Orbit centerVideo="/videos/circle.mp4" />
       </section>
 
       <section className="service-section">
