@@ -4,6 +4,17 @@ import React, { useEffect, useRef } from "react";
 import { motion, type Variants } from "framer-motion";
 import { cn } from "@/lib/utils";
 
+// ShivayTech theme: deep space navy/black with electric neon-blue glow.
+// Change colors here and the whole section follows.
+const THEME = {
+  neon: "#2b7fff", // borders, glows, button outline
+  neonSoft: "#4da3ff", // lighter accent
+  text: "#ffffff",
+  textMuted: "#9db4e0",
+  glowSm: "0 0 12px rgba(43,127,255,0.55)",
+  glowLg: "0 0 18px rgba(43,127,255,0.65), 0 0 42px rgba(30,107,255,0.35)",
+};
+
 // Space background that fills only its parent section (the parent must be position: relative).
 // Stars are drawn ONCE onto 3 small canvases (no animation loop). The twinkle is a CSS opacity
 // fade on each canvas with a different duration/delay, so it runs on the GPU compositor
@@ -40,9 +51,9 @@ const SpaceBackdrop = () => {
     // star positions are stored as 0..1 so a resize redraws the same sky
     const stars: Star[] = Array.from({ length: 180 }, () => {
       const light = Math.random() < 0.18;
-      const hue = light ? 220 : 216 + Math.random() * 22;
-      const sat = light ? 25 : 95;
-      const lum = light ? 85 + Math.random() * 10 : 50 + Math.random() * 25;
+      const hue = light ? 215 : 208 + Math.random() * 24; // electric blues
+      const sat = light ? 30 : 100;
+      const lum = light ? 88 + Math.random() * 8 : 55 + Math.random() * 25;
       return {
         x: Math.random(),
         y: Math.random(),
@@ -112,8 +123,11 @@ const SpaceBackdrop = () => {
       aria-hidden
       className="pointer-events-none absolute inset-0"
       style={{
-        background:
+        // deep navy core fading to black, plus a soft neon glow rising from the bottom edge
+        background: [
+          "radial-gradient(ellipse 80% 30% at 50% 100%, rgba(30,107,255,0.28) 0%, rgba(30,107,255,0) 70%)",
           "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
+        ].join(", "),
       }}
     >
       <style>{TWINKLE_CSS}</style>
@@ -142,12 +156,13 @@ interface AnimatedMarqueeHeroProps {
   className?: string;
 }
 
-// Reusable Button component styled like in the image
+// Dark pill with a neon outline, matching the "Get a Quote" button in the navbar
 const ActionButton = ({ children }: { children: React.ReactNode }) => (
   <motion.button
     whileHover={{ scale: 1.05 }}
     whileTap={{ scale: 0.95 }}
-    className="mt-8 px-8 py-3 rounded-full bg-red-500 text-white font-semibold shadow-lg transition-colors hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-opacity-75"
+    className="mt-8 rounded-full border-2 bg-[#02040f]/70 px-8 py-3 font-semibold text-white backdrop-blur-sm transition-colors hover:bg-[#2b7fff]/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4da3ff] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+    style={{ borderColor: THEME.neon, boxShadow: THEME.glowLg }}
   >
     {children}
   </motion.button>
@@ -174,7 +189,7 @@ export const AnimatedMarqueeHero: React.FC<AnimatedMarqueeHeroProps> = ({
   return (
     <section
       className={cn(
-        "relative w-full h-screen overflow-hidden flex flex-col items-center justify-center text-center px-4",
+        "relative w-full h-screen overflow-hidden flex flex-col items-center justify-center text-center px-4 bg-black",
         className
       )}
     >
@@ -186,7 +201,12 @@ export const AnimatedMarqueeHero: React.FC<AnimatedMarqueeHeroProps> = ({
           initial="hidden"
           animate="show"
           variants={FADE_IN_ANIMATION_VARIANTS}
-          className="mb-4 inline-block rounded-full border border-border bg-card/50 px-4 py-1.5 text-sm font-medium text-muted-foreground backdrop-blur-sm"
+          className="mb-4 inline-block rounded-full border bg-[#050b2a]/60 px-4 py-1.5 text-sm font-medium backdrop-blur-sm"
+          style={{
+            borderColor: `${THEME.neon}99`,
+            color: THEME.neonSoft,
+            boxShadow: THEME.glowSm,
+          }}
         >
           {tagline}
         </motion.div>
@@ -203,7 +223,11 @@ export const AnimatedMarqueeHero: React.FC<AnimatedMarqueeHeroProps> = ({
               },
             },
           }}
-          className="text-5xl md:text-7xl font-bold tracking-tighter text-foreground"
+          className="text-5xl md:text-7xl font-bold tracking-tighter"
+          style={{
+            color: THEME.text,
+            textShadow: "0 0 24px rgba(43,127,255,0.45)",
+          }}
         >
           {typeof title === "string" ? (
             title.split(" ").map((word, i) => (
@@ -226,7 +250,8 @@ export const AnimatedMarqueeHero: React.FC<AnimatedMarqueeHeroProps> = ({
           animate="show"
           variants={FADE_IN_ANIMATION_VARIANTS}
           transition={{ delay: 0.5 }}
-          className="mt-6 max-w-xl text-lg text-muted-foreground"
+          className="mt-6 max-w-xl text-lg"
+          style={{ color: THEME.textMuted }}
         >
           {description}
         </motion.p>
@@ -266,7 +291,8 @@ export const AnimatedMarqueeHero: React.FC<AnimatedMarqueeHeroProps> = ({
               <img
                 src={src}
                 alt={`Showcase image ${index + 1}`}
-                className="w-full h-full object-cover rounded-2xl shadow-md"
+                className="w-full h-full object-cover rounded-2xl border-2"
+                style={{ borderColor: THEME.neon, boxShadow: THEME.glowLg }}
               />
             </div>
           ))}

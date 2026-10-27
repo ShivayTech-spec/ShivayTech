@@ -7,8 +7,9 @@
  * Install:  npm i react-pageflip
  * Images:   put project screenshots in /public/work/  (names are in REASONS below)
  *
- * v8: - background is now the same space backdrop as the hero (radial navy gradient + twinkling canvas stars)
- * v7: - FIX: book no longer gets stuck on one page (flip controller polls the library state)
+ * v8: - FIX: book pages stack correctly (position:absolute restored on .wwu-flip .wwu-page)
+ *     - NEW: glowing centre star (aura, halo, cast shadow, pulse, rotating ring)
+ *     - book no longer gets stuck on one page (flip controller polls the library state)
  *     - inside of the book re-themed to match the cover (navy, neon blue, silver)
  *     - real page-flip interaction: corner curl on hover, drag / click to flip
  *       (scroll and hand-flipping stay in sync)
@@ -169,6 +170,7 @@ const SEAT_R = 335;
 const TABLE_R = 255;
 const ANGLES = [30, 90, 150, 210, 270, 330];
 const ROMAN = ["I", "II", "III", "IV", "V", "VI"];
+const STAR_D = "M0,-46 C5,-14 14,-5 46,0 C14,5 5,14 0,46 C-5,14 -14,5 -46,0 C-14,-5 -5,-14 0,-46Z";
 
 /* ───────────────────────── SMALL PIECES ───────────────────────── */
 
@@ -206,121 +208,6 @@ function Shot({ src, name }: { src: string; name: string }) {
           <div className="ph">{name}</div>
         )}
       </div>
-    </div>
-  );
-}
-
-/* ───────────────────────── SPACE BACKDROP (same as the hero) ───────────────────────── */
-
-type SkyStar = { x: number; y: number; r: number; a: number; color: string };
-
-const TWINKLE_LAYERS = 3;
-
-const TWINKLE_CSS = `
-  @keyframes sb-twinkle { 0%,100%{opacity:.3} 50%{opacity:1} }
-  .sb-layer{will-change:opacity;animation:sb-twinkle 4s ease-in-out infinite}
-  .sb-layer-0{animation-duration:3s;animation-delay:0s}
-  .sb-layer-1{animation-duration:4.5s;animation-delay:-1.5s}
-  .sb-layer-2{animation-duration:6s;animation-delay:-3s}
-  @media (prefers-reduced-motion:reduce){.sb-layer{animation:none;opacity:.8;will-change:auto}}
-`;
-
-function SpaceBackdrop() {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
-
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    const canvases = canvasRefs.current.filter(Boolean) as HTMLCanvasElement[];
-    if (!wrap || canvases.length !== TWINKLE_LAYERS) return;
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-
-    const stars: SkyStar[] = Array.from({ length: 180 }, () => {
-      const light = Math.random() < 0.18;
-      const hue = light ? 220 : 216 + Math.random() * 22;
-      const sat = light ? 25 : 95;
-      const lum = light ? 85 + Math.random() * 10 : 50 + Math.random() * 25;
-      return {
-        x: Math.random(),
-        y: Math.random(),
-        r: 0.8 + Math.random() * 1.4,
-        a: 0.45 + Math.random() * 0.45,
-        color: `hsl(${hue} ${sat}% ${lum}%)`,
-      };
-    });
-
-    let raf = 0;
-    const draw = () => {
-      const w = wrap.clientWidth;
-      const h = wrap.clientHeight;
-      if (!w || !h) return;
-      const count = Math.min(stars.length, Math.round((w * h) / (w < 768 ? 12000 : 9000)));
-
-      canvases.forEach((canvas, layer) => {
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, w, h);
-
-        for (let i = layer; i < count; i += TWINKLE_LAYERS) {
-          const s = stars[i];
-          const x = s.x * w;
-          const y = s.y * h;
-          ctx.fillStyle = s.color;
-          ctx.globalAlpha = s.a * 0.18;
-          ctx.beginPath();
-          ctx.arc(x, y, s.r * 3, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.globalAlpha = s.a;
-          ctx.beginPath();
-          ctx.arc(x, y, s.r, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.globalAlpha = 1;
-      });
-    };
-
-    const schedule = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(draw);
-    };
-    schedule();
-    const ro = new ResizeObserver(schedule);
-    ro.observe(wrap);
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-    };
-  }, []);
-
-  return (
-    <div
-      ref={wrapRef}
-      aria-hidden="true"
-      style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none",
-        background:
-          "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
-      }}
-    >
-      <style>{TWINKLE_CSS}</style>
-      {Array.from({ length: TWINKLE_LAYERS }, (_, i) => (
-        <canvas
-          key={i}
-          ref={(el) => {
-            canvasRefs.current[i] = el;
-          }}
-          className={`sb-layer sb-layer-${i}`}
-          style={{ position: "absolute", inset: 0 }}
-        />
-      ))}
     </div>
   );
 }
@@ -1911,6 +1798,22 @@ export default function WhyWorkWithUs() {
     [goTo]
   );
 
+  /* stars (seeded so server and client match) */
+  const stars = useMemo(() => {
+    let s = 11;
+    const rnd = () => {
+      s = (s * 16807) % 2147483647;
+      return s / 2147483647;
+    };
+    return Array.from({ length: 90 }, () => ({
+      x: +(rnd() * 100).toFixed(2),
+      y: +(rnd() * 100).toFixed(2),
+      r: +(rnd() * 1.6 + 0.5).toFixed(2),
+      d: +(rnd() * 5).toFixed(2),
+      o: +(rnd() * 0.5 + 0.35).toFixed(2),
+    }));
+  }, []);
+
   /* ───────── book pages ───────── */
   const { pw, ph, S, k, tx, bx } = dims;
   const fs = Math.max(8.5, pw / 22);
@@ -2057,7 +1960,24 @@ export default function WhyWorkWithUs() {
 
       <div className="wwu-sticky">
         {/* backdrop */}
-        <SpaceBackdrop />
+        <div className="wwu-stars" aria-hidden="true">
+          {stars.map((s, i) => (
+            <span
+              key={i}
+              className="wwu-star"
+              style={
+                {
+                  left: `${s.x}%`,
+                  top: `${s.y}%`,
+                  width: s.r,
+                  height: s.r,
+                  animationDelay: `${s.d}s`,
+                  "--o": s.o,
+                } as React.CSSProperties
+              }
+            />
+          ))}
+        </div>
 
         {/* heading */}
         <header className="wwu-head" style={{ width: headW }}>
@@ -2096,6 +2016,22 @@ export default function WhyWorkWithUs() {
                   <feMergeNode in="SourceGraphic" />
                 </feMerge>
               </filter>
+
+              {/* centre star: core gradient, aura, blur */}
+              <radialGradient id="wwuCoreG" cx="50%" cy="50%" r="50%">
+                <stop offset="0" stopColor="#ffffff" />
+                <stop offset="0.35" stopColor="#bcd8ff" />
+                <stop offset="1" stopColor="#2f6bff" />
+              </radialGradient>
+              <radialGradient id="wwuStarAura">
+                <stop offset="0" stopColor="#4f8bff" stopOpacity="0.55" />
+                <stop offset="0.5" stopColor="#2f6bff" stopOpacity="0.18" />
+                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
+              </radialGradient>
+              <filter id="wwuStarBlur" x="-100%" y="-100%" width="300%" height="300%">
+                <feGaussianBlur stdDeviation="9" />
+              </filter>
+
               <PersonDefs />
             </defs>
 
@@ -2103,11 +2039,23 @@ export default function WhyWorkWithUs() {
             <circle cx={500} cy={500} r={TABLE_R + 22} fill="#2f6bff" opacity={0.08} />
             <circle cx={500} cy={500} r={TABLE_R} fill="url(#wwuTable)" stroke="#2f6bff" strokeWidth={3} filter="url(#wwuGlow)" />
             <circle cx={500} cy={500} r={TABLE_R - 34} fill="none" stroke="#4f8bff" strokeOpacity={0.18} strokeWidth={1.5} />
-            <g transform="translate(500 500) scale(1.5)" opacity={0.35}>
-              <path
-                d="M0,-46 C5,-14 14,-5 46,0 C14,5 5,14 0,46 C-5,14 -14,5 -46,0 C-14,-5 -5,-14 0,-46Z"
-                fill="#4f8bff"
-              />
+
+            {/* centre star with glow, shadow, pulse and a slow rotating ring */}
+            <g transform="translate(500 500)">
+              <circle r={175} fill="url(#wwuStarAura)" />
+              <circle className="wwu-ring" r={96} fill="none" stroke="#7fb0ff" strokeOpacity={0.35} strokeWidth={1.2} strokeDasharray="2 9" />
+              <g className="wwu-starfx">
+                <g filter="url(#wwuStarBlur)" opacity={0.7} transform="translate(0 14)">
+                  <path d={STAR_D} fill="#000" transform="scale(1.7)" />
+                </g>
+                <g filter="url(#wwuStarBlur)">
+                  <path d={STAR_D} fill="#2f6bff" transform="scale(2.1)" />
+                </g>
+                <g filter="url(#wwuGlow)">
+                  <path d={STAR_D} fill="url(#wwuCoreG)" transform="scale(1.6)" />
+                </g>
+                <path d={STAR_D} fill="#fff" opacity={0.9} transform="scale(0.5)" />
+              </g>
             </g>
 
             {/* people */}
@@ -2160,13 +2108,19 @@ export default function WhyWorkWithUs() {
 /* ───────────────────────── CSS ───────────────────────── */
 
 const CSS = `
-.wwu{position:relative;background:#000;color:#e8f0ff}
+.wwu{position:relative;background:#02040c;color:#e8f0ff}
 .wwu *{box-sizing:border-box}
-.wwu-sticky{contain:layout paint;position:sticky;top:0;height:100vh;height:100dvh;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000}
+.wwu-sticky{contain:layout paint;position:sticky;top:0;height:100vh;height:100dvh;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(ellipse at 50% 45%,#0a1534 0%,#040815 55%,#02040c 100%)}
 .wwu-m .wwu-sticky{flex-direction:column;gap:10px;padding-top:74px}
 
 /* animations only run while the section is on screen (nothing is removed) */
 .wwu:not(.live) *,.wwu:not(.live) *::before,.wwu:not(.live) *::after{animation-play-state:paused!important}
+
+/* stars */
+.wwu-stars{position:absolute;inset:0;pointer-events:none}
+.wwu-star{position:absolute;border-radius:50%;background:#cfe0ff;opacity:var(--o);animation:wwuTw 5s ease-in-out infinite}
+@keyframes wwuTw{0%,100%{opacity:var(--o)}50%{opacity:.12}}
 
 /* heading */
 .wwu-head{position:absolute;left:4vw;top:6vh;z-index:6}
@@ -2232,9 +2186,10 @@ const CSS = `
 
 /* ── book pages: same look as the cover (navy, neon blue, silver) ── */
 .wwu-page{overflow:hidden;
-
   --ink:#e6eeff;--ink2:#9fb4dc;--acc:#9cc4ff;--neon:#2f6bff;--silver:#cfd8ea;
   font-family:inherit}
+/* the flip library positions every page absolutely; keep it that way */
+.wwu-flip .wwu-page{position:absolute}
 
 .wwu-page.l{color:var(--ink);border:1px solid rgba(80,140,255,.45);
   background:
@@ -2322,8 +2277,15 @@ const CSS = `
 .wwu-progress div{height:100%;transform-origin:left;transform:scaleX(0);background:linear-gradient(90deg,#2f6bff,#9cc4ff)}
 .wwu-hint{position:absolute;bottom:4vh;left:0;right:0;text-align:center;margin:0;font-size:14px;color:#8fb0ee;z-index:6;animation:wwuNow .8s ease both}
 
+/* centre star */
+.wwu-starfx,.wwu-ring{transform-box:fill-box;transform-origin:center}
+.wwu-starfx{animation:wwuStarPulse 3.6s ease-in-out infinite}
+@keyframes wwuStarPulse{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.07);opacity:1}}
+.wwu-ring{animation:wwuSpin 40s linear infinite}
+@keyframes wwuSpin{to{transform:rotate(360deg)}}
+
 @media (prefers-reduced-motion:reduce){
-  .wwu-float,.wwu-person.on .wwu-halo,.wwu-body,.wwu-person.on .wwu-headg,.wwu-person.on .wwu-hand{animation:none}
+  .wwu-star,.wwu-float,.wwu-person.on .wwu-halo,.wwu-body,.wwu-person.on .wwu-headg,.wwu-person.on .wwu-hand,.wwu-starfx,.wwu-ring{animation:none}
   .wwu-rise,.wwu-scene,.wwu-slide{transition:none}
 }
 `;
