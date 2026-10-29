@@ -1652,13 +1652,13 @@ const SERVICES: Service[] = [
 // Where each card rests in the pile, as a fraction (0..1) of the free room inside the section.
 // Same loose pile as the original desktop layout, but it now scales with the section size.
 const SPOTS = [
-  { x: 0.257, y: 0.452 },
-  { x: 0.321, y: 0.576 },
-  { x: 0.514, y: 0.432 },
-  { x: 0.707, y: 0.543 },
-  { x: 0.55, y: 0.493 },
-  { x: 0.579, y: 0.51 },
-  { x: 0.386, y: 0.444 },
+  { x: 0.22, y: 0.37 }, // 0 Web Development — upper-left
+  { x: 0.15, y: 0.66 }, // 1 Web Redesign — lower-left
+  { x: 0.79, y: 0.32 }, // 2 Web Maintenance — upper-right
+  { x: 0.83, y: 0.65 }, // 3 SEO Optimization — lower-right
+  { x: 0.43, y: 0.24 }, // 4 Google Ads — top orbit
+  { x: 0.5, y: 0.62 }, // 5 Meta Ads — bottom orbit
+  { x: 0.69, y: 0.43 }, // 6 Google Business Profile — right inner orbit
 ];
 
 function computeLayout(W: number) {

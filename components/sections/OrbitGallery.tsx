@@ -30,7 +30,9 @@ const USER_PAUSE = 4000 // ms after the user lets go before auto-change can happ
 // 2) almost top-down (ring face-on), 3) from above (near side at the bottom)
 const VIEW_ANGLES = [68, 105, 200]
 
+// const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
+
 
 // Video that fills the big center circle (put your file in /public/videos/)
 const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
@@ -39,14 +41,17 @@ const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
 const DEFAULT_CENTER_IMAGE = "/images/sample1.png"
 
 const PROFILES = [
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
-  "/images/sample1.png",
+  "/images/github.jpg",
+  "/images/metaads.jpg",
+  "/images/SEO.jpg",
+  "/images/vs-code.jpg",
+  "/images/social-media.jpg",
+  "/images/react.jpg",
+    "/images/google-ads.jpg",
+    "/images/growth.jpg",
+
+  
+  
 ]
 
 // Catches errors (like a missing texture file) so they can't crash the whole 3D scene
