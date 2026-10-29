@@ -506,7 +506,8 @@ const BookCover = ({
       style={{
         width: PAGE_W,
         height: PAGE_H,
-        background: `linear-gradient(150deg, rgba(${accent},0.4), rgb(${base}) 40%, #02040f 120%)`,
+        // slightly less accent tint + slightly deeper end colour
+        background: `linear-gradient(150deg, rgba(${accent},0.3), rgb(${base}) 40%, #01030b 120%)`,
         boxShadow: `inset 0 0 0 1px rgba(${GOLD},0.3), inset 0 0 50px rgba(0,0,0,0.5), inset 2px 2px 0 rgba(255,255,255,0.07), inset -3px -3px 8px rgba(0,0,0,0.5)`,
       }}
     >
@@ -535,17 +536,17 @@ const BookCover = ({
         </div>
       )}
 
-      {/* color grade: leather color at top/bottom so text stays readable, picture shows in the middle */}
+      {/* color grade: leather color at top/bottom so text stays readable, picture shows in the middle (middle a touch darker) */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
         style={{
-          background: `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.08) 44%, rgba(${base},0.05) 62%, rgba(${base},0.85) 88%, rgba(${base},0.98) 100%)`,
+          background: `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
         }}
       />
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 mix-blend-soft-light"
+        className="pointer-events-none absolute inset-0 opacity-75 mix-blend-soft-light"
         style={{
           background: `linear-gradient(135deg, rgba(${accent},0.6), transparent 60%)`,
         }}
@@ -566,7 +567,7 @@ const BookCover = ({
         className="pointer-events-none absolute inset-0"
         style={{
           background:
-            "radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0,0,0,0.38) 100%)",
+            "radial-gradient(ellipse at 50% 45%, transparent 52%, rgba(0,0,0,0.46) 100%)",
         }}
       />
 
@@ -625,7 +626,7 @@ const BookCover = ({
           className="mt-4 text-center font-serif text-[38px] leading-[1.08] font-semibold"
           style={{
             color: GOLD_TEXT,
-            textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 24px rgba(${accent},0.55)`,
+            textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 24px rgba(${accent},0.4)`,
           }}
         >
           {title}
@@ -689,12 +690,12 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
         </div>
       )}
 
-      {/* overlays */}
+      {/* overlays (a touch darker to match the cover) */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
         style={{
-          background: `linear-gradient(to bottom, rgba(${base},0.96) 0%, rgba(${base},0.3) 38%, rgba(${base},0.35) 60%, rgba(${base},0.96) 100%)`,
+          background: `linear-gradient(to bottom, rgba(${base},0.96) 0%, rgba(${base},0.4) 38%, rgba(${base},0.45) 60%, rgba(${base},0.96) 100%)`,
         }}
       />
       <div
@@ -1527,6 +1528,7 @@ const ServiceSheet = ({
 
 // Put your images in /public/services/ and they show up on the cover and the left page.
 // Until the file exists, a placeholder is shown.
+// `base` values are the original ones multiplied by ~0.78 (a little darker).
 const SERVICES: Service[] = [
   {
     title: "Web Development",
@@ -1535,7 +1537,7 @@ const SERVICES: Service[] = [
     script: "Ideas into Reality",
     icon: <CodeIcon />,
     accent: "70,130,255",
-    base: "11,31,92",
+    base: "9,24,72",
     image: "/images/sample1.png",
     features: [
       { icon: <CodeIcon />, title: "Custom Development", desc: "Fast, scalable and modern websites built for your goals." },
@@ -1552,7 +1554,7 @@ const SERVICES: Service[] = [
     script: "Old to Outstanding",
     icon: <LayoutIcon />,
     accent: "160,100,255",
-    base: "43,18,89",
+    base: "34,14,70",
     image: "/images/sample1.png",
     features: [
       { icon: <LayoutIcon />, title: "Fresh Modern Look", desc: "A new design that matches your brand today." },
@@ -1569,7 +1571,7 @@ const SERVICES: Service[] = [
     script: "Always Running Smooth",
     icon: <WrenchIcon />,
     accent: "40,185,125",
-    base: "10,61,44",
+    base: "8,48,34",
     image: "/images/sample1.png",
     features: [
       { icon: <WrenchIcon />, title: "Regular Updates", desc: "Core, plugins and dependencies kept current." },
@@ -1586,7 +1588,7 @@ const SERVICES: Service[] = [
     script: "Be Found First",
     icon: <SearchIcon />,
     accent: "245,170,50",
-    base: "74,43,6",
+    base: "58,34,5",
     image: "/images/sample1.png",
     features: [
       { icon: <SearchIcon />, title: "On-Page SEO", desc: "Titles, content and structure that rank." },
@@ -1603,7 +1605,7 @@ const SERVICES: Service[] = [
     script: "Right People, Right Time",
     icon: <TargetIcon />,
     accent: "235,70,80",
-    base: "77,15,26",
+    base: "60,12,20",
     image: "/images/sample1.png",
     features: [
       { icon: <TargetIcon />, title: "Search Campaigns", desc: "Show up when customers are ready to buy." },
@@ -1620,7 +1622,7 @@ const SERVICES: Service[] = [
     script: "Stop the Scroll",
     icon: <MegaphoneIcon />,
     accent: "225,85,155",
-    base: "74,16,56",
+    base: "58,13,44",
     image: "/images/sample1.png",
     features: [
       { icon: <MegaphoneIcon />, title: "Facebook & Instagram", desc: "Campaigns across both platforms." },
@@ -1637,7 +1639,7 @@ const SERVICES: Service[] = [
     script: "Win Your Neighbourhood",
     icon: <PinIcon />,
     accent: "30,200,210",
-    base: "8,64,74",
+    base: "6,50,58",
     image: "/images/sample1.png",
     features: [
       { icon: <PinIcon />, title: "Profile Optimization", desc: "A complete, search-ready business listing." },
