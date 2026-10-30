@@ -5,15 +5,15 @@
  * Path: components/sections/WhyWorkWithUs.tsx   (one file, CSS included)
  *
  * Install:  npm i react-pageflip
- * Images:   put project screenshots in /public/work/  (names are in REASONS below)
+ * Images:   put project screenshots in /public/images/  (names are in REASONS below)
  *
- * v8: - FIX: book pages stack correctly (position:absolute restored on .wwu-flip .wwu-page)
- *     - NEW: glowing centre star (aura, halo, cast shadow, pulse, rotating ring)
- *     - book no longer gets stuck on one page (flip controller polls the library state)
- *     - inside of the book re-themed to match the cover (navy, neon blue, silver)
- *     - real page-flip interaction: corner curl on hover, drag / click to flip
- *       (scroll and hand-flipping stay in sync)
- *     - every animation and visual effect is kept
+ * v9: - FIX: every screenshot is shown in full (object-fit: contain) inside the browser frame,
+ *            a blurred copy of the same image fills any empty space (no bars, no cropping)
+ *     - FIX: the screenshot frame takes the space that is left on the page, so it is never
+ *            squashed and the placeholder text is never clipped
+ *     - FIX: all six image paths now use /images/ (the old Shivay Fashion path used /work/)
+ *     - FIX: images that fail before React attaches onError now fall back to the placeholder
+ *     - everything from v8 is kept (book, flip controller, glowing star, people, animations)
  */
 
 import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -46,7 +46,7 @@ type Reason = {
     type: string;
     detail: string;
     tags: string[];
-    image: string; // screenshot in /public/work
+    image: string; // screenshot in /public/images
   };
   look: Look;
 };
@@ -65,7 +65,7 @@ const REASONS: Reason[] = [
       type: "Real-estate website",
       detail: "A Next.js website with its own blog and admin system, built to be managed without a developer.",
       tags: ["Next.js", "TypeScript", "Admin panel"],
-      image: "/work/platinum-realtors.jpg",
+      image: "/images/platinum.png",
     },
     look: { shirt: "#2f6bff", hair: "#1a1410", skin: "#d9a67c", hairStyle: "short", glasses: true, item: "notebook", watch: true },
   },
@@ -82,7 +82,7 @@ const REASONS: Reason[] = [
       type: "Construction company website",
       detail: "SEO service pages, an admin dashboard and Google Business Profile optimisation.",
       tags: ["SEO pages", "Dashboard", "GMB"],
-      image: "/work/grand-home-construction.jpg",
+      image: "/images/grand-homes.png",
     },
     look: { shirt: "#e0334a", hair: "#2a1c14", skin: "#c48a62", hairStyle: "long", item: "phone" },
   },
@@ -99,7 +99,7 @@ const REASONS: Reason[] = [
       type: "Shopify store",
       detail: "Custom Liquid sections with payment and shipping integration.",
       tags: ["Shopify", "Liquid", "Payments"],
-      image: "/work/rishi-vaidik.jpg",
+      image: "/images/rishi.png",
     },
     look: { shirt: "#c98f12", hair: "#2b1d14", skin: "#e8bb94", hairStyle: "turban", cloth: "#f1b72f", beard: true, item: "notebook" },
   },
@@ -116,7 +116,7 @@ const REASONS: Reason[] = [
       type: "Digital agency website",
       detail: "A multi-page site with Three.js visuals and smooth AJAX navigation.",
       tags: ["Three.js", "AJAX nav", "Multi-page"],
-      image: "/work/rank-up-digitaly.jpg",
+      image: "/images/rank.png",
     },
     look: { shirt: "#19b6a6", hair: "#14100d", skin: "#b9805a", hairStyle: "curly", item: "phone" },
   },
@@ -133,7 +133,7 @@ const REASONS: Reason[] = [
       type: "College website",
       detail: "A blog system on Node, Express and MongoDB so staff can publish on their own.",
       tags: ["Node.js", "Express", "MongoDB"],
-      image: "/work/sggs-khalsa-college.jpg",
+      image: "/images/sggs.png",
     },
     look: { shirt: "#8a5cf6", hair: "#1d1612", skin: "#f0c8a0", hairStyle: "bun", glasses: true, item: "notebook" },
   },
@@ -150,7 +150,7 @@ const REASONS: Reason[] = [
       type: "Fashion brand",
       detail: "Replace this line with what you maintain and grow for this client.",
       tags: ["Maintenance", "Google Ads", "Meta Ads"],
-      image: "/work/shivay-fashion.jpg",
+      image: "/images/shivay-fashion.jpg",
     },
     look: { shirt: "#7cb7ff", hair: "#2a2018", skin: "#a8714a", hairStyle: "buzz", beard: true, item: "phone" },
   },
@@ -191,8 +191,22 @@ function Star({ size = 40 }: { size?: number }) {
   );
 }
 
+/**
+ * Browser-style screenshot frame.
+ * The whole image is always visible (object-fit: contain). A blurred copy of the same
+ * image fills the empty space, so wide, tall or square screenshots all look right.
+ */
 function Shot({ src, name }: { src: string; name: string }) {
   const [ok, setOk] = useState(true);
+  const fg = useRef<HTMLImageElement | null>(null);
+
+  /* catches images that already failed before React attached onError */
+  useEffect(() => {
+    setOk(true);
+    const el = fg.current;
+    if (el && el.complete && el.naturalWidth === 0) setOk(false);
+  }, [src]);
+
   return (
     <div className="wwu-shot">
       <div className="bar">
@@ -202,8 +216,21 @@ function Shot({ src, name }: { src: string; name: string }) {
       </div>
       <div className="view">
         {ok ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={src} alt={`${name} website screenshot`} loading="lazy" decoding="async" onError={() => setOk(false)} />
+          <>
+            {/* blurred copy fills any empty space */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img className="bg" src={src} alt="" aria-hidden="true" loading="lazy" decoding="async" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              ref={fg}
+              className="fg"
+              src={src}
+              alt={`${name} website screenshot`}
+              loading="lazy"
+              decoding="async"
+              onError={() => setOk(false)}
+            />
+          </>
         ) : (
           <div className="ph">{name}</div>
         )}
@@ -2218,6 +2245,9 @@ const CSS = `
 .wwu-pc::before{top:-.45em;left:-.45em;border-width:2px 0 0 2px}
 .wwu-pc::after{bottom:-.45em;right:-.45em;border-width:0 2px 2px 0}
 
+/* only the screenshot flexes; everything else keeps its own height */
+.wwu-pc > :not(.wwu-shot){flex:none}
+
 .wwu-pc .k{margin:0;font-size:.8em;letter-spacing:.3em;text-transform:uppercase;color:var(--acc)}
 
 .wwu-pc h3{margin:.1em 0 .2em;font-size:1.75em;line-height:1.1;font-weight:800;
@@ -2255,15 +2285,17 @@ const CSS = `
 .wwu-curl{position:absolute;right:0;bottom:0;width:2.8em;height:2.8em;z-index:3;
   background:linear-gradient(135deg,transparent 50%,#02050f 50%,#1d3a8a);box-shadow:-3px -3px 8px rgba(47,107,255,.3)}
 
-/* screenshot: neon-edged browser frame */
-.wwu-shot{border-radius:.3em;overflow:hidden;border:1.5px solid #4f8bff;background:#050d2a;
+/* screenshot: neon-edged browser frame (the whole image is always visible) */
+.wwu-shot{flex:1 1 auto;min-height:6em;display:flex;flex-direction:column;border-radius:.3em;overflow:hidden;border:1.5px solid #4f8bff;background:#050d2a;
   box-shadow:0 0 14px rgba(47,107,255,.6),0 6px 14px rgba(0,0,0,.5);
   transform:perspective(700px) rotateY(-7deg);transform-origin:left center}
-.wwu-shot .bar{display:flex;gap:.3em;padding:.4em .6em;background:#0a1740}
+.wwu-shot .bar{flex:none;display:flex;gap:.3em;padding:.4em .6em;background:#0a1740}
 .wwu-shot .bar i{width:.5em;height:.5em;border-radius:50%;background:#4f8bff}
-.wwu-shot .view{aspect-ratio:16/10;position:relative}
-.wwu-shot img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top}
-.wwu-shot .ph{position:absolute;inset:0;display:grid;place-items:center;padding:.6em;text-align:center;font-weight:800;color:#cfe0ff;background:linear-gradient(135deg,#0b1a4a,#02050f)}
+.wwu-shot .view{flex:1 1 0;min-height:0;position:relative;overflow:hidden;background:#050d2a}
+.wwu-shot img{position:absolute;inset:0;width:100%;height:100%;display:block}
+.wwu-shot img.bg{object-fit:cover;filter:blur(14px) brightness(.55);transform:scale(1.2)}
+.wwu-shot img.fg{object-fit:contain;object-position:center}
+.wwu-shot .ph{position:absolute;inset:0;display:grid;place-items:center;padding:.6em;text-align:center;font-weight:800;font-size:.95em;color:#cfe0ff;background:linear-gradient(135deg,#0b1a4a,#02050f)}
 
 /* covers (the art is an SVG) */
 .wwu-cover{border:0;background:#02040c;border-radius:3px 8px 8px 3px;box-shadow:inset 0 0 0 1px rgba(80,140,255,.45)}
