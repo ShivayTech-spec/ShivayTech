@@ -7,16 +7,23 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import gsap from "gsap";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
-/* OPTIMIZATION NOTES (CSS)
-   - backdrop-filter removed from the panel and the button: re-blurring a live WebGL canvas every frame is very expensive.
-     Replaced by a slightly more opaque background so the look stays the same.
-   - filter: blur() removed from the panel entrance keyframes (forces a repaint every frame).
-   - The infinite box-shadow pulse on the button (repaint every frame) is replaced by a compositor-only `scale` pulse.
-   - touch-action: pan-y on the canvas so touch scrolling is never delayed by the pointer handlers. */
+/* OPTIMIZATION NOTES
+   CSS
+   - backdrop-filter / filter: blur removed, infinite box-shadow pulse replaced by a compositor-only `scale` pulse.
+   - stick height uses 100svh so the mobile address bar never resizes the canvas while scrolling.
+   - Mobile / touch: no layout-animating keyframes (max-width / padding morph), no sweep overlay, no staggered children.
+   - Inputs are 16px (prevents iOS zoom), tap targets >= 44px, safe-area insets, short-landscape layout.
+   3D (low tier = every phone / tablet / <=4 cores / <=4GB / data-saver device)
+   - MeshPhysicalMaterial (sheen / clearcoat) replaced by MeshStandardMaterial.
+   - Planet shader skips the derivative bump-mapping + finest detail noise.
+   - Fewer polygons everywhere (spheres, capsules, rocks, moon, planet, Earth), fewer particles / stars.
+   - Flag cloth is simulated every 2nd frame.
+   - Dynamic resolution drops lower and, if still slow, the loop switches to a steady 30 fps instead of stuttering.
+   - Rendering pauses when the tab is hidden. Height-only resizes (mobile URL bar) do not rebuild the canvas. */
 const CSS = `
 .st-cta { position: relative; background: #02040c; }
 .st-cta__stick {
-  position: sticky; top: 0; height: 100vh; overflow: hidden; contain: layout paint;
+  position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden; contain: layout paint;
   background: radial-gradient(ellipse at 50% 125%, #0b2a66 0%, #050c24 45%, #02040c 75%);
 }
 .st-cta__canvas { position: absolute; inset: 0; opacity: 0; transition: opacity 0.9s ease; }
@@ -24,8 +31,8 @@ const CSS = `
 .st-cta__canvas canvas { display: block; width: 100%; height: 100%; touch-action: pan-y; }
 
 .st-cta__hint {
-  position: absolute; left: 50%; bottom: 6vh; transform: translateX(-50%);
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  position: absolute; left: 50%; bottom: calc(6vh + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 10px; width: max-content; max-width: 90vw; text-align: center;
   color: #bcd6ff; font-size: 14px; letter-spacing: 0.04em; pointer-events: none;
 }
 .st-cta__hint i {
@@ -40,8 +47,8 @@ const CSS = `
 
 .st-cta__panel {
   position: absolute; left: 6vw; top: 50%; transform: translateY(-50%);
-  width: min(440px, 88vw); padding: 28px; color: #e8f1ff; overflow: hidden;
-  background: rgba(6, 14, 34, 0.86);
+  width: min(440px, 88vw); max-height: 92svh; overflow-x: hidden; overflow-y: auto; padding: 28px; color: #e8f1ff;
+  background: rgba(6, 14, 34, 0.9); -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
   border: 1px solid rgba(58, 160, 255, 0.55); border-radius: 22px;
   box-shadow: 0 0 28px rgba(58, 160, 255, 0.22), inset 0 0 24px rgba(58, 160, 255, 0.08);
   animation: st-panel 1s cubic-bezier(0.2, 0.9, 0.2, 1) both;
@@ -63,15 +70,15 @@ const CSS = `
   to { opacity: 1; transform: translateY(-50%) scale(1); }
 }
 @keyframes st-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-/* sweep now uses transform (compositor) instead of animating "left" (layout) */
 @keyframes st-sweep { from { transform: translateX(-150%); } to { transform: translateX(325%); } }
-.st-cta__panel h2 { margin: 0 0 10px; font-size: clamp(26px, 3.2vw, 36px); line-height: 1.1; font-weight: 700; }
+.st-cta__panel h2 { margin: 0 0 10px; font-size: clamp(24px, 3.2vw, 36px); line-height: 1.1; font-weight: 700; }
 .st-cta__panel p { margin: 0 0 20px; font-size: 15px; line-height: 1.55; color: #a9c0e6; }
 .st-cta__panel label { display: block; margin-bottom: 14px; font-size: 13px; color: #8fb2e8; }
 .st-cta__panel input,
 .st-cta__panel select {
-  width: 100%; margin-top: 6px; padding: 12px 14px; font: inherit; font-size: 15px; color: #fff;
-  background: rgba(10, 22, 52, 0.8); border: 1px solid rgba(120, 170, 255, 0.35); border-radius: 12px; outline: none;
+  width: 100%; min-height: 46px; margin-top: 6px; padding: 12px 14px; font: inherit; font-size: 16px; color: #fff;
+  background: rgba(10, 22, 52, 0.9); border: 1px solid rgba(120, 170, 255, 0.35); border-radius: 12px; outline: none;
+  box-sizing: border-box; -webkit-appearance: none; appearance: none;
 }
 .st-cta__panel input:focus,
 .st-cta__panel select:focus { border-color: #3aa0ff; box-shadow: 0 0 0 3px rgba(58, 160, 255, 0.25); }
@@ -81,10 +88,10 @@ const CSS = `
 .st-cta__select option { background: #0a1634; }
 
 .st-cta__go {
-  display: inline-block; width: 100%; margin-top: 6px; padding: 13px 28px; font: inherit; font-size: 16px; font-weight: 600; color: #fff;
-  background: rgba(58, 160, 255, 0.12); border: 1.5px solid #3aa0ff; border-radius: 999px; cursor: pointer;
+  display: inline-block; width: 100%; min-height: 48px; margin-top: 6px; padding: 13px 28px; font: inherit; font-size: 16px; font-weight: 600; color: #fff;
+  background: rgba(58, 160, 255, 0.12); border: 1.5px solid #3aa0ff; border-radius: 999px; cursor: pointer; box-sizing: border-box;
   box-shadow: 0 0 18px rgba(58, 160, 255, 0.45), inset 0 0 12px rgba(58, 160, 255, 0.2);
-  transition: background 0.2s, box-shadow 0.2s;
+  transition: background 0.2s, box-shadow 0.2s; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .st-cta__go:hover:not(:disabled) { background: rgba(58, 160, 255, 0.3); box-shadow: 0 0 28px rgba(58, 160, 255, 0.75); }
 .st-cta__go:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -92,11 +99,11 @@ const CSS = `
 
 .st-cta__start {
   position: absolute; left: 0; top: 0; display: inline-flex; align-items: center; justify-content: center;
-  height: 50px; overflow: hidden; white-space: nowrap; font: inherit; font-size: 17px; font-weight: 700; color: #fff;
+  height: 50px; min-width: 50px; overflow: hidden; white-space: nowrap; font: inherit; font-size: 17px; font-weight: 700; color: #fff;
   text-decoration: none; background: rgba(10, 28, 64, 0.92);
   border: 1.5px solid #6cc6ff; border-radius: 999px; cursor: pointer;
   box-shadow: 0 0 34px rgba(100, 195, 255, 0.85), inset 0 0 16px rgba(80, 180, 255, 0.4);
-  will-change: transform;
+  will-change: transform; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
   animation: st-morph 1s cubic-bezier(0.2, 0.9, 0.2, 1) both, st-pulse 2.4s 1.1s ease-in-out infinite;
   transition: opacity 0.3s;
 }
@@ -107,19 +114,19 @@ const CSS = `
   100% { max-width: 300px; padding: 0 34px; }
 }
 @keyframes st-text { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
-/* "scale" is an individual transform property, so it composes with the JS-driven translate and runs on the compositor */
 @keyframes st-pulse { 0%, 100% { scale: 1; } 50% { scale: 1.05; } }
+@keyframes st-pop-in { from { opacity: 0; scale: 0.6; } to { opacity: 1; scale: 1; } }
 
 .st-cta__welcome {
-  position: absolute; left: 50%; top: 9vh; transform: translateX(-50%); margin: 0; text-align: center;
-  font-size: clamp(20px, 2.6vw, 30px); color: #e8f1ff; text-shadow: 0 0 18px rgba(58, 160, 255, 0.7);
+  position: absolute; left: 50%; top: 9svh; transform: translateX(-50%); margin: 0; text-align: center; width: max-content; max-width: 92vw;
+  font-size: clamp(18px, 2.6vw, 30px); color: #e8f1ff; text-shadow: 0 0 18px rgba(58, 160, 255, 0.7);
   animation: st-fade 1s 1.4s ease both;
 }
 @keyframes st-fade { from { opacity: 0; } to { opacity: 1; } }
 
 .st-cta__msg {
-  position: absolute; left: 50%; top: 15vh; transform: translateX(-50%); margin: 0; text-align: center; pointer-events: none;
-  font-size: clamp(30px, 6vw, 72px); font-weight: 800; letter-spacing: 0.06em; color: #fff;
+  position: absolute; left: 50%; top: 15svh; transform: translateX(-50%); margin: 0; text-align: center; pointer-events: none; width: max-content; max-width: 94vw;
+  font-size: clamp(28px, 6vw, 72px); font-weight: 800; letter-spacing: 0.06em; color: #fff;
   text-shadow: 0 0 24px rgba(58, 160, 255, 0.9), 0 0 60px rgba(58, 160, 255, 0.5);
   animation: st-pop 0.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
@@ -131,11 +138,45 @@ const CSS = `
 }
 .st-cta__veil.is-on { opacity: 1; }
 
+/* ---- tablets / phones ---- */
 @media (max-width: 760px) {
-  .st-cta__panel { left: 50%; top: auto; bottom: 4vh; transform: translateX(-50%); padding: 20px; animation: st-panel-m 1s cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+  .st-cta__panel {
+    left: 50%; top: auto; bottom: calc(2svh + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+    width: calc(100vw - 24px); max-width: 440px; padding: 18px 16px;
+    animation: st-panel-m 0.7s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+  }
   .st-cta__panel p { display: none; }
+  .st-cta__panel h2 { margin-bottom: 12px; }
+  .st-cta__panel label { margin-bottom: 10px; }
+  .st-cta__hint { font-size: 13px; }
 }
-@keyframes st-panel-m { from { opacity: 0; transform: translateX(-50%) translateY(40px) scale(0.94); } to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
+@keyframes st-panel-m { from { opacity: 0; transform: translateX(-50%) translateY(40px) scale(0.96); } to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
+
+/* ---- touch / small screens: only compositor-friendly animation, nothing that forces layout ---- */
+@media (max-width: 760px), (pointer: coarse) {
+  .st-cta__panel::before { display: none; }
+  .st-cta__panel > * { animation: none; }
+  .st-cta__start { max-width: 300px; padding: 0 30px; animation: st-pop-in 0.5s ease both, st-pulse 2.4s 0.6s ease-in-out infinite; }
+  .st-cta__start span { animation: none; }
+  .st-cta__go, .st-cta__start { box-shadow: 0 0 14px rgba(58, 160, 255, 0.45); }
+}
+
+/* ---- short landscape phones ---- */
+@media (max-height: 520px) and (orientation: landscape) {
+  .st-cta__panel { left: 3vw; top: 50%; bottom: auto; transform: translateY(-50%); width: min(380px, 52vw); max-height: 94svh; padding: 12px 14px; animation: st-panel 0.7s cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+  .st-cta__panel p { display: none; }
+  .st-cta__panel h2 { font-size: 20px; margin-bottom: 8px; }
+  .st-cta__panel label { margin-bottom: 6px; font-size: 12px; }
+  .st-cta__panel input, .st-cta__panel select { min-height: 40px; padding: 8px 12px; }
+  .st-cta__go { min-height: 44px; padding: 9px 20px; }
+  .st-cta__welcome { top: 5svh; }
+  .st-cta__msg { top: 8svh; font-size: clamp(24px, 8vh, 48px); }
+  .st-cta__hint { bottom: 3svh; }
+}
+@media (max-width: 360px) {
+  .st-cta__panel { padding: 14px 12px; }
+  .st-cta__start { font-size: 15px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .st-cta__hint i::after, .st-cta__panel, .st-cta__panel::before, .st-cta__panel > *, .st-cta__start, .st-cta__start span, .st-cta__welcome, .st-cta__msg { animation: none; }
 }
@@ -176,24 +217,28 @@ interface Quality {
   low: boolean; pr: number; antialias: boolean; shadows: boolean; shadowSize: number;
   planetSeg: [number, number]; stars: number; moonSeg: [number, number]; texSize: number;
   rocks: number; crystals: number; earthSeg: [number, number]; cloth: [number, number, number, number];
-  particles: number; nebula: number;
+  particles: number; nebula: number; minPR: number;
 }
 const HIGH_Q: Quality = {
   low: false, pr: 1.75, antialias: true, shadows: true, shadowSize: 2048, planetSeg: [160, 120], stars: 1100,
-  moonSeg: [220, 90], texSize: 512, rocks: 300, crystals: 48, earthSeg: [96, 72], cloth: [48, 32, 36, 14], particles: 220, nebula: 512,
+  moonSeg: [220, 90], texSize: 512, rocks: 300, crystals: 48, earthSeg: [96, 72], cloth: [48, 32, 36, 14], particles: 220, nebula: 512, minPR: 0.6,
 };
 const LOW_Q: Quality = {
-  low: true, pr: 1, antialias: false, shadows: false, shadowSize: 0, planetSeg: [72, 54], stars: 500,
-  moonSeg: [140, 56], texSize: 256, rocks: 140, crystals: 24, earthSeg: [56, 42], cloth: [26, 18, 20, 8], particles: 120, nebula: 256,
+  low: true, pr: 0.85, antialias: false, shadows: false, shadowSize: 0, planetSeg: [56, 42], stars: 350,
+  moonSeg: [96, 40], texSize: 256, rocks: 90, crystals: 16, earthSeg: [40, 30], cloth: [20, 14, 16, 6],
+  particles: 90, nebula: 192, minPR: 0.5,
 };
 let Q: Quality = HIGH_Q;
 
+// every phone / tablet / weak desktop is treated as "low": smooth beats pretty on those devices
 function detectLow() {
   if (typeof navigator === "undefined") return false;
-  const n = navigator as Navigator & { deviceMemory?: number };
+  const n = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
   const cores = n.hardwareConcurrency || 4, mem = n.deviceMemory || 8;
   const coarse = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
-  return cores <= 4 || mem <= 4 || (coarse && cores <= 6);
+  const small = typeof screen !== "undefined" && Math.min(screen.width, screen.height) <= 820;
+  const saveData = !!n.connection?.saveData;
+  return cores <= 4 || mem <= 4 || coarse || small || saveData;
 }
 
 /* ---------- shared GLSL noise (octave counts shrink on the low tier via the LOW define) ---------- */
@@ -226,6 +271,7 @@ void main(){
 }`;
 
 // expensive terms are skipped with branches wherever they can't be seen (far away / ocean / day side)
+// on the LOW tier the derivative bump-mapping and the finest noise layer are compiled out entirely
 const PLANET_FS = `
 uniform vec3 uSun; uniform float uTime;
 varying vec3 vP, vWN, vW;
@@ -244,12 +290,21 @@ void main(){
   float cap = smoothstep(.88, .94, lat + (cont-.5)*.1);
 
   float hh = 0.0;
-  if (detail > 0.001) { hh = detail*fbm(vP*1.1, 3)*.35; if (fine > 0.001) hh += fine*fbm(vP*6.0, 2)*.12; }
+  if (detail > 0.001) {
+    hh = detail*fbm(vP*1.1, 3)*.35;
+    #ifndef LOW
+    if (fine > 0.001) hh += fine*fbm(vP*6.0, 2)*.12;
+    #endif
+  }
+  #ifdef LOW
+  vec3 N = N0;
+  #else
   float hb = hh * max(land, cap);
   vec3 dpx = dFdx(vW), dpy = dFdy(vW); float dhx = dFdx(hb), dhy = dFdy(hb);
   vec3 r1 = cross(dpy, N0), r2 = cross(N0, dpx); float det = dot(dpx, r1);
   vec3 grad = sign(det) * (dhx*r1 + dhy*r2);
   vec3 N = normalize(abs(det)*N0 - 0.7*grad);
+  #endif
 
   vec3 ocean = mix(vec3(.004,.02,.09), vec3(.02,.12,.34), smoothstep(.36,.47,cont));
   vec3 rock = vec3(0.0);
@@ -323,6 +378,20 @@ void main(){
 const std = (c: string, r = 0.6, m = 0) =>
   new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: m });
 
+// physical materials (sheen / clearcoat) are expensive: the low tier gets a plain standard material with the same colours
+const phys = (p: THREE.MeshPhysicalMaterialParameters): THREE.Material => {
+  if (!Q.low) return new THREE.MeshPhysicalMaterial(p);
+  /* eslint-disable @typescript-eslint/no-unused-vars */
+  const { sheen, sheenRoughness, sheenColor, clearcoat, clearcoatRoughness, ...rest } = p;
+  /* eslint-enable @typescript-eslint/no-unused-vars */
+  return new THREE.MeshStandardMaterial(rest as THREE.MeshStandardMaterialParameters);
+};
+
+// geometry helpers that shrink their segment counts on the low tier
+const sphG = (r: number) => new THREE.SphereGeometry(r, Q.low ? 12 : 20, Q.low ? 8 : 14);
+const capG = (r: number, l: number) => new THREE.CapsuleGeometry(r, l, Q.low ? 3 : 8, Q.low ? 10 : 20);
+const rbG = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, Q.low ? 2 : 4, r);
+
 const gy = (x: number, z: number) => Math.sqrt(R * R - x * x - z * z) - R;
 
 const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0) => {
@@ -331,7 +400,7 @@ const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 
   return m;
 };
 const ringAt = (r: number, t: number, mat: THREE.Material, y: number) => {
-  const m = mesh(new THREE.TorusGeometry(r, t, 12, 36), mat, 0, y, 0);
+  const m = mesh(new THREE.TorusGeometry(r, t, Q.low ? 8 : 12, Q.low ? 24 : 36), mat, 0, y, 0);
   m.rotation.x = Math.PI / 2;
   return m;
 };
@@ -391,17 +460,16 @@ const at = <T extends THREE.Object3D>(o: T, x = 0, y = 0, z = 0): T => { o.posit
 
 /* ---------- astronaut ---------- */
 function buildAstronaut(fab: THREE.Texture, patchTex: THREE.Texture) {
-  const suit = new THREE.MeshPhysicalMaterial({
+  const suit = phys({
     color: "#f0f1f4", roughness: 0.78, bumpMap: fab, bumpScale: 1.5,
     sheen: 0.5, sheenRoughness: 0.8, sheenColor: new THREE.Color("#ffffff"),
   });
-  const dusty = new THREE.MeshPhysicalMaterial({ color: "#c4c4c8", roughness: 0.9, bumpMap: fab, bumpScale: 1.5 });
+  const dusty = phys({ color: "#c4c4c8", roughness: 0.9, bumpMap: fab, bumpScale: 1.5 });
   const metal = std("#bfc6d1", 0.28, 0.95), dark = std("#1d2027", 0.65, 0.25), rubber = std("#121418", 0.9, 0);
   const glove = std("#b4b9c3", 0.7, 0.05);
-  const gold = new THREE.MeshPhysicalMaterial({ color: "#e3b04b", metalness: 1, roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.03 });
-  const cap = (r: number, l: number) => new THREE.CapsuleGeometry(r, l, 8, 20);
-  const sph = (r: number) => new THREE.SphereGeometry(r, 20, 14);
-  const rb = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 4, r);
+  const gold = phys({ color: "#e3b04b", metalness: 1, roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.03 });
+  const cap = capG, sph = sphG, rb = rbG;
+  const hs = Q.low ? 28 : 48, vs = Q.low ? 20 : 32;
 
   const b = new THREE.Group();
   b.add(mesh(rb(0.42, 0.22, 0.28, 0.08), suit, 0, 1.08, 0));
@@ -425,7 +493,7 @@ function buildAstronaut(fab: THREE.Texture, patchTex: THREE.Texture) {
   // hoses
   const hose = (s: number, col: string) => {
     const pts = [[s * 0.1, 1.36, 0.22], [s * 0.2, 1.12, 0.3], [s * 0.36, 1.0, 0.1], [s * 0.34, 1.2, -0.22]].map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-    return mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 28, 0.018, 8), std(col, 0.6, 0.2));
+    return mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), Q.low ? 16 : 28, 0.018, Q.low ? 5 : 8), std(col, 0.6, 0.2));
   };
   b.add(hose(1, "#d0d4da"), hose(-1, "#d9772b"));
 
@@ -437,8 +505,8 @@ function buildAstronaut(fab: THREE.Texture, patchTex: THREE.Texture) {
 
   // helmet
   const head = new THREE.Group(); head.position.y = 1.92;
-  head.add(mesh(new THREE.SphereGeometry(0.3, 48, 32), suit));
-  head.add(mesh(new THREE.SphereGeometry(0.306, 48, 32, Math.PI / 2 - 1.05, 2.1, Math.PI * 0.3, Math.PI * 0.42), gold));
+  head.add(mesh(new THREE.SphereGeometry(0.3, hs, vs), suit));
+  head.add(mesh(new THREE.SphereGeometry(0.306, hs, vs, Math.PI / 2 - 1.05, 2.1, Math.PI * 0.3, Math.PI * 0.42), gold));
   const lampMat = new THREE.MeshStandardMaterial({ color: "#222", emissive: "#fff6d8", emissiveIntensity: 2 });
   for (const s of [-1, 1]) {
     head.add(mesh(sph(0.04), dark, s * 0.3, 0, 0));
@@ -506,22 +574,21 @@ function buildCat(fab: THREE.Texture, patchTex: THREE.Texture) {
     mouth: 0, joy: 0, wave: 0, nod: 0, hop: 0, lastClick: 0,
   };
 
-  const suit = new THREE.MeshPhysicalMaterial({
+  const suit = phys({
     color: "#f4f5f8", roughness: 0.62, bumpMap: fab, bumpScale: 0.8,
     sheen: 0.6, sheenRoughness: 0.7, sheenColor: new THREE.Color("#ffffff"),
   });
-  const dusty = new THREE.MeshPhysicalMaterial({ color: "#d6d8de", roughness: 0.85, bumpMap: fab, bumpScale: 0.8 });
+  const dusty = phys({ color: "#d6d8de", roughness: 0.85, bumpMap: fab, bumpScale: 0.8 });
   const metal = std("#c9d0db", 0.28, 0.9), dark = std("#1d2027", 0.6, 0.25), rubber = std("#121418", 0.9, 0);
   const rimMat = std("#e8edf5", 0.25, 0.8);
-  const visorMat = new THREE.MeshPhysicalMaterial({ color: "#04070f", metalness: 0.4, roughness: 0.06, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.8 });
+  const visorMat = phys({ color: "#04070f", metalness: 0.4, roughness: 0.06, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.8 });
   const glow = new THREE.MeshBasicMaterial({ color: "#8ff0ff" });
   const blueGlow = new THREE.MeshBasicMaterial({ color: "#3aa0ff" });
   const white = new THREE.MeshBasicMaterial({ color: "#ffffff" });
   const pink = new THREE.MeshBasicMaterial({ color: "#ff8fb1" });
   const padMat = std("#ff9bb8", 0.7, 0);
-  const cap = (r: number, l: number) => new THREE.CapsuleGeometry(r, l, 8, 20);
-  const sph = (r: number) => new THREE.SphereGeometry(r, 20, 14);
-  const rb = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 4, r);
+  const cap = capG, sph = sphG, rb = rbG;
+  const hs = Q.low ? 32 : 56, vs = Q.low ? 22 : 40;
 
   /* ---- torso ---- */
   const torso = at(new THREE.Group(), 0, 0.43, 0); b.add(torso);
@@ -589,8 +656,8 @@ function buildCat(fab: THREE.Texture, patchTex: THREE.Texture) {
   for (let i = 0; i < N; i++) {
     const r0 = 0.024 - i * 0.0014, r1 = r0 - 0.0014;
     const seg = at(new THREE.Group(), 0, i ? SL : 0, 0); seg.rotation.x = i ? 0.17 : 0;
-    seg.add(mesh(new THREE.SphereGeometry(r0 * 0.97, 14, 10), suit));
-    seg.add(mesh(new THREE.CylinderGeometry(r1, r0, SL, 14, 1, true).translate(0, SL / 2, 0), suit));
+    seg.add(mesh(new THREE.SphereGeometry(r0 * 0.97, Q.low ? 8 : 14, Q.low ? 6 : 10), suit));
+    seg.add(mesh(new THREE.CylinderGeometry(r1, r0, SL, Q.low ? 8 : 14, 1, true).translate(0, SL / 2, 0), suit));
     if (i % 2 === 1) seg.add(at(ringAt(r0 * 1.05, 0.005, i > 3 ? blueGlow : metal, 0), 0, SL * 0.5, 0));
     if (i === N - 1) {
       seg.add(at(mesh(sph(r1 * 1.3), glow), 0, SL, 0));
@@ -603,10 +670,10 @@ function buildCat(fab: THREE.Texture, patchTex: THREE.Texture) {
   /* ---- big round helmet ---- */
   const HR = 0.33, VR = HR + 0.012;
   const head = at(new THREE.Group(), 0, 0.84, 0.01);
-  head.add(mesh(new THREE.SphereGeometry(HR, 56, 40), suit));
+  head.add(mesh(new THREE.SphereGeometry(HR, hs, vs), suit));
   // silver rim + black glossy visor
-  head.add(mesh(new THREE.SphereGeometry(HR + 0.004, 56, 40, Math.PI / 2 - 1.3, 2.6, Math.PI * 0.2, Math.PI * 0.62), rimMat));
-  head.add(mesh(new THREE.SphereGeometry(HR + 0.009, 56, 40, Math.PI / 2 - 1.22, 2.44, Math.PI * 0.225, Math.PI * 0.56), visorMat));
+  head.add(mesh(new THREE.SphereGeometry(HR + 0.004, hs, vs, Math.PI / 2 - 1.3, 2.6, Math.PI * 0.2, Math.PI * 0.62), rimMat));
+  head.add(mesh(new THREE.SphereGeometry(HR + 0.009, hs, vs, Math.PI / 2 - 1.22, 2.44, Math.PI * 0.225, Math.PI * 0.56), visorMat));
   head.add(mesh(
     new THREE.SphereGeometry(HR + 0.013, 24, 12, Math.PI / 2 + 0.3, 0.6, Math.PI * 0.3, Math.PI * 0.18),
     new THREE.MeshBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false })
@@ -784,19 +851,20 @@ function buildPole(h: number) {
   const g = new THREE.Group(), base = new THREE.Group();
   const alu = new THREE.MeshStandardMaterial({ color: "#d4d9e1", roughness: 0.22, metalness: 1 });
   const dark = std("#14171d", 0.6, 0.5), gold = std("#e3b04b", 0.2, 1);
+  const rs = Q.low ? 12 : 20;
   const secs: [number, number, number][] = [[0, 0.38, 0.04], [0.38, 0.7, 0.032], [0.7, 1, 0.024]];
   for (const [a, b, r] of secs) {
     const len = (b - a) * h;
-    g.add(mesh(new THREE.CylinderGeometry(r * 0.92, r, len, 20), alu, 0, a * h + len / 2, 0));
-    if (a > 0) g.add(mesh(new THREE.CylinderGeometry(r * 1.35, r * 1.35, 0.07, 20), dark, 0, a * h, 0));
+    g.add(mesh(new THREE.CylinderGeometry(r * 0.92, r, len, rs), alu, 0, a * h + len / 2, 0));
+    if (a > 0) g.add(mesh(new THREE.CylinderGeometry(r * 1.35, r * 1.35, 0.07, rs), dark, 0, a * h, 0));
   }
   g.add(mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.05, 16), gold, 0, h, 0));
-  g.add(mesh(new THREE.SphereGeometry(0.055, 18, 14), gold, 0, h + 0.07, 0));
+  g.add(mesh(new THREE.SphereGeometry(0.055, Q.low ? 12 : 18, Q.low ? 8 : 14), gold, 0, h + 0.07, 0));
   g.add(mesh(new THREE.ConeGeometry(0.014, 0.14, 12), gold, 0, h + 0.17, 0));
   // base (sits at ground level; the pole group is planted 0.2 below it)
   base.position.y = 0.2;
-  base.add(mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.04, 28), dark, 0, 0.02, 0));
-  base.add(mesh(new THREE.CylinderGeometry(0.06, 0.075, 0.22, 20), alu, 0, 0.13, 0));
+  base.add(mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.04, Q.low ? 18 : 28), dark, 0, 0.02, 0));
+  base.add(mesh(new THREE.CylinderGeometry(0.06, 0.075, 0.22, rs), alu, 0, 0.13, 0));
   base.add(ringAt(0.07, 0.012, dark, 0.22));
   for (let i = 0; i < 3; i++) {
     const hold = new THREE.Group(); hold.rotation.y = (i * Math.PI * 2) / 3;
@@ -864,7 +932,7 @@ function buildFlag(fab: THREE.Texture, o: { dir?: 1 | -1; w?: number; h?: number
 function brandFlagTexture(logoSrc?: string) {
   const c = document.createElement("canvas"); c.width = 960; c.height = 640;
   const x = c.getContext("2d")! as CanvasRenderingContext2D & { letterSpacing?: string };
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Q.low ? 2 : 8;
   const stars = Array.from({ length: 70 }, () => [Math.random() * 960, Math.random() * 640, 0.2 + Math.random() * 0.6]);
   const draw = (img?: HTMLImageElement) => {
     x.shadowBlur = 0; x.letterSpacing = "0px";
@@ -928,14 +996,14 @@ function shipTexture(seams: number[]) {
   soot.addColorStop(0, "rgba(22,18,15,.72)"); soot.addColorStop(1, "rgba(22,18,15,0)");
   x.fillStyle = soot; x.fillRect(0, Y(0.24), Wd, Y(SK) - Y(0.24));
   // grime streaks running up the hull
-  for (let i = 0; i < 70; i++) {
+  for (let i = 0; i < (Q.low ? 35 : 70); i++) {
     const px = Math.random() * Wd, len = 40 + Math.random() * 220;
     const g2 = x.createLinearGradient(0, Y(SK), 0, Y(SK) - len);
     g2.addColorStop(0, "rgba(30,26,22,.22)"); g2.addColorStop(1, "rgba(30,26,22,0)");
     x.fillStyle = g2; x.fillRect(px, Y(SK) - len, 1 + Math.random() * 3, len);
   }
   // speckle
-  for (let i = 0; i < 6000; i++) { x.fillStyle = Math.random() < 0.5 ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.06)"; x.fillRect(Math.random() * Wd, Math.random() * Hd, 2, 2); }
+  for (let i = 0; i < (Q.low ? 2500 : 6000); i++) { x.fillStyle = Math.random() < 0.5 ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.06)"; x.fillRect(Math.random() * Wd, Math.random() * Hd, 2, 2); }
   // vertical panel lines
   x.strokeStyle = "rgba(40,46,58,.35)"; x.lineWidth = 1.5;
   for (let i = 0; i <= 8; i++) { x.beginPath(); x.moveTo(i * 64, 0); x.lineTo(i * 64, Hd); x.stroke(); }
@@ -947,7 +1015,7 @@ function shipTexture(seams: number[]) {
     x.fillStyle = "rgba(70,76,90,.85)";
     for (let px = 8; px < Wd; px += 18) { x.beginPath(); x.arc(px, y + 8, 1.5, 0, 7); x.fill(); }
   });
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = Q.low ? 2 : 4;
   return t;
 }
 
@@ -990,7 +1058,7 @@ function buildShip() {
   for (let i = 8; i <= 33; i += 5) seams.push(i / (prof.length - 1));
   const tex = shipTexture(seams);
   const hull = new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.8, metalness: 0.3, roughness: 0.4, envMapIntensity: 1.5 });
-  g.add(new THREE.Mesh(new THREE.LatheGeometry(prof.map(([r, y]) => new THREE.Vector2(r, y)), Q.low ? 48 : 72), hull));
+  g.add(new THREE.Mesh(new THREE.LatheGeometry(prof.map(([r, y]) => new THREE.Vector2(r, y)), Q.low ? 32 : 72), hull));
 
   const navy = std("#1a2236", 0.45, 0.8); // navy fins / legs
   const chrome = std("#d5dbe6", 0.25, 0.95);
@@ -1090,7 +1158,7 @@ function buildShip() {
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
   const cone = (r: number, h: number, core: number) => {
-    const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 18, 6, true), flameMat(core));
+    const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, Q.low ? 12 : 18, Q.low ? 4 : 6, true), flameMat(core));
     m.rotation.x = Math.PI; m.position.y = -h / 2; return m;
   };
   const bellMat = new THREE.MeshStandardMaterial({ color: "#23262e", roughness: 0.45, metalness: 0.85, emissive: "#ff7a22", emissiveIntensity: 0, side: THREE.DoubleSide });
@@ -1526,7 +1594,7 @@ function createLunarEnvironment({ scene, site, R, up }: LunarEnvOptions, defer: 
 
       defer(() => {
         /* ===== instanced meteoroid rocks (one draw call): charcoal crust, rusty patches, iron glints ===== */
-        const rockGeo = own(rockGeometry(Q.low ? 3 : 4, [1, 1, 1], 9));
+        const rockGeo = own(rockGeometry(Q.low ? 2 : 4, [1, 1, 1], 9));
         const rockMat = own(new THREE.MeshStandardMaterial({ color: "#ffffff", vertexColors: true, roughness: 0.78, metalness: 0.28 }));
         const ROCKS = Q.rocks;
         const rocks = new THREE.InstancedMesh(rockGeo, rockMat, ROCKS);
@@ -1604,7 +1672,7 @@ function createLunarEnvironment({ scene, site, R, up }: LunarEnvOptions, defer: 
             vertexShader: BODY_VS, fragmentShader: EARTH_ATMO_FS,
             side: THREE.BackSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
           }));
-          const atmo = new THREE.Mesh(own(new THREE.SphereGeometry(EARTH_RAD * 1.06, 64, 48)), atmoMat);
+          const atmo = new THREE.Mesh(own(new THREE.SphereGeometry(EARTH_RAD * 1.06, Q.low ? 32 : 64, Q.low ? 24 : 48)), atmoMat);
           earthGroup.add(earth, atmo);
           scene.add(earthGroup); objs.push(earthGroup);
 
@@ -1630,7 +1698,7 @@ function createLunarEnvironment({ scene, site, R, up }: LunarEnvOptions, defer: 
               [13, 3.6, -6, 0.45], [7.5, 8.5, -26, 0.9], [-14, 9, -30, 1.2],
               [3, 2.4, -34, 0.35], [16, 6.5, -14, 0.7], [-12, 1.2, -16, 0.5],
             ];
-            const astGeo = own(rockGeometry(Q.low ? 4 : 5, [1.1, 0.82, 1], 4));
+            const astGeo = own(rockGeometry(Q.low ? 3 : 5, [1.1, 0.82, 1], 4));
             const astMat = own(new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.8, metalness: 0.25, vertexColors: true, emissive: "#1a0e08", emissiveIntensity: 0.4 }));
             const asts = new THREE.InstancedMesh(astGeo, astMat, AST.length);
             asts.frustumCulled = false; asts.visible = false;
@@ -1839,7 +1907,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         vertexShader: PLANET_VS, fragmentShader: ATMO_FS,
         side: THREE.BackSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
       });
-      scene.add(planet, new THREE.Mesh(new THREE.SphereGeometry(R * 1.07, Q.low ? 64 : 96, Q.low ? 48 : 64), atmoMat));
+      scene.add(planet, new THREE.Mesh(new THREE.SphereGeometry(R * 1.07, Q.low ? 40 : 96, Q.low ? 30 : 64), atmoMat));
 
       // tilted banded ring (fades out as the camera lands)
       const ringMat = new THREE.ShaderMaterial({
@@ -1847,7 +1915,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         vertexShader: RING_VS, fragmentShader: RING_FS,
         transparent: true, side: THREE.DoubleSide, depthWrite: false,
       });
-      const ring = new THREE.Mesh(new THREE.RingGeometry(R * 1.35, R * 2.1, Q.low ? 96 : 160, 1), ringMat);
+      const ring = new THREE.Mesh(new THREE.RingGeometry(R * 1.35, R * 2.1, Q.low ? 64 : 160, 1), ringMat);
       ring.rotation.set(1.25, 0, 0.2);
       scene.add(ring);
 
@@ -2056,7 +2124,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
 
       // dust puff (positions are written straight into the typed array: no per-particle array allocations)
       const puff = (x: number, z: number) => {
-        const n = Q.low ? 30 : 50, v = new Float32Array(n * 3), pos = new Float32Array(n * 3);
+        const n = Q.low ? 24 : 50, v = new Float32Array(n * 3), pos = new Float32Array(n * 3);
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2, s = 0.6 + Math.random() * 1.6;
           v[i * 3] = Math.cos(a) * s; v[i * 3 + 1] = 0.3 + Math.random() * 0.7; v[i * 3 + 2] = Math.sin(a) * s;
@@ -2083,7 +2151,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       // glowing shockwave ring on the ground
       const shockwave = (x: number, z: number, size = 5) => {
         const waveMat = new THREE.MeshBasicMaterial({ color: "#6cc6ff", transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
-        const wave = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 64), waveMat);
+        const wave = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, Q.low ? 32 : 64), waveMat);
         wave.rotation.x = -Math.PI / 2;
         wave.position.set(x, gy(x, z) + 0.08, z);
         wave.scale.setScalar(0.1);
@@ -2232,7 +2300,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
             const [legL, legR] = astro.legs, [armA, armB] = astro.arms;
             const mk = (wd: number, h: number) => {
               const c = document.createElement("canvas"); c.width = wd; c.height = h;
-              const tx = new THREE.CanvasTexture(c); tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = 8;
+              const tx = new THREE.CanvasTexture(c); tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = Q.low ? 2 : 8;
               return { x: c.getContext("2d")!, tx };
             };
             const F = mk(960, 640), Nm = mk(880, 304), P = mk(150, 100);
@@ -2452,6 +2520,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       const look = new THREE.Vector3(), tmp = new THREE.Vector3(), clock = new THREE.Clock();
       const clamp = THREE.MathUtils.clamp;
       let sp = 0, raf = 0, running = false, shown = false, fpsT = 0, fpsN = 0;
+      let skip30 = false, skipPar = false; // steady 30 fps fallback when even the lowest resolution is too slow
 
       // Section geometry is measured only occasionally (and on resize) instead of calling getBoundingClientRect()
       // every frame, which forced a synchronous layout on each tick. Scroll progress = (scrollY - sectionTop) / (height - viewport).
@@ -2461,10 +2530,17 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         secTop = r.top + window.scrollY; secH = r.height; vhC = window.innerHeight;
       };
       measure();
-      let rzRaf = 0;
+      let rzRaf = 0, lastW = host.clientWidth, lastH = host.clientHeight;
+      const isTouch = !!window.matchMedia?.("(pointer: coarse)").matches;
       const onResize = () => {
         cancelAnimationFrame(rzRaf);
-        rzRaf = requestAnimationFrame(() => { sizeIt(); measure(); });
+        rzRaf = requestAnimationFrame(() => {
+          const wd = host.clientWidth, h = host.clientHeight;
+          // mobile URL bar show / hide only changes the height a little: do NOT resize the WebGL buffer for that
+          if (isTouch && wd === lastW && Math.abs(h - lastH) < 140) { measure(); return; }
+          lastW = wd; lastH = h;
+          sizeIt(); measure();
+        });
       };
       window.addEventListener("resize", onResize);
 
@@ -2483,6 +2559,8 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       const tick = () => {
         if (!running) return;
         raf = requestAnimationFrame(tick);
+        // 30 fps fallback: render every second frame only (steady beats stuttering)
+        if (skip30) { skipPar = !skipPar; if (skipPar) return; }
         if ((frameN++ & 31) === 0) measure();
         const rawDt = clock.getDelta();
         const dt = Math.min(rawDt, 0.05), time = clock.elapsedTime;
@@ -2492,14 +2570,17 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
 
         flushMove();
 
-        // dynamic resolution: if the device struggles, quietly render fewer pixels
+        // dynamic resolution: if the device struggles, quietly render fewer pixels, then fall back to 30 fps
         if (W && rawDt < 0.25) {
           fpsT += rawDt; fpsN++;
-          if (fpsN >= 40) {
+          if (fpsN >= 30) {
             const avg = fpsT / fpsN; fpsT = 0; fpsN = 0;
-            if (avg > 0.032 && pr > 0.6) {
-              pr = Math.max(0.6, pr * 0.8);
+            const slow = Q.low ? 0.024 : 0.032;
+            if (avg > slow && pr > Q.minPR) {
+              pr = Math.max(Q.minPR, pr * 0.8);
               renderer.setPixelRatio(pr); starMat.uniforms.uPR.value = pr; sizeIt();
+            } else if (!skip30 && pr <= Q.minPR + 0.01 && avg > 0.034) {
+              skip30 = true;
             }
           }
         }
@@ -2600,9 +2681,12 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
           if (st.boarding) { squeeze(astro.g, 1); squeeze(cat.g, 0.95); }
 
           // flags keep waving: steady breeze plus slow gusts (country flag streams right, ShivayTech flag left)
-          const gust = 1 + 0.25 * Math.sin(time * 0.9) + 0.15 * Math.sin(time * 2.3 + 1);
-          if (flag.g.visible) flag.update(time, st.flagAmp * gust);
-          if (brand.g.visible) brand.update(time + 1.7, st.brandAmp * gust);
+          // on the low tier the cloth is only simulated every 2nd frame (CPU vertex work + normals is the costly part)
+          if (!Q.low || (frameN & 1) === 0) {
+            const gust = 1 + 0.25 * Math.sin(time * 0.9) + 0.15 * Math.sin(time * 2.3 + 1);
+            if (flag.g.visible) flag.update(time, st.flagAmp * gust);
+            if (brand.g.visible) brand.update(time + 1.7, st.brandAmp * gust);
+          }
 
           /* ----- rocket: everything below is driven by st.thrust ----- */
           const th = st.thrust, shipY = ship.g.position.y, hgt = shipY - SHIP_GROUND;
@@ -2635,7 +2719,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
 
           // exhaust trail + dust blown across the ground
           if (th > 0.04 && ship.g.visible) {
-            st.emitAcc += dt * th * (Q.low ? 34 : 60);
+            st.emitAcc += dt * th * (Q.low ? 30 : 60);
             while (st.emitAcc >= 1) {
               st.emitAcc -= 1;
               if (hgt > 0.8) {
@@ -2649,7 +2733,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
           }
           // cryo vents hiss white vapour on the pad (more during the countdown)
           if (st.shipLanded && ship.g.visible && th < 0.05) {
-            st.ventAcc += dt * (2.5 + st.vent * 22);
+            st.ventAcc += dt * (2.5 + st.vent * (Q.low ? 14 : 22));
             while (st.ventAcc >= 1) {
               st.ventAcc -= 1;
               smoke.emit(SHIP_POS.x + 0.45, shipY + 2.7, SHIP_POS.z - 0.35, rnd(0.4, 1.2), rnd(0.3, 0.9), rnd(-0.4, 0.2), 1.6 + Math.random() * 0.6, 0.15, 0.9, 0, 0.3 + st.vent * 0.15);
@@ -2663,7 +2747,9 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         if (st.btnOn && btn.current) {
           const wd = host.clientWidth, h = host.clientHeight;
           const v = site.localToWorld(tmp.set(ANCHOR.x, ANCHOR.y + Math.sin(time * 2) * 0.06, ANCHOR.z)).project(cam);
-          const px = clamp((v.x * 0.5 + 0.5) * wd, 90, wd - 90), py = clamp((-v.y * 0.5 + 0.5) * h, 70, h - 70);
+          // keep the floating button fully on screen on narrow phones (and above the bottom edge)
+          const padX = Math.min(90, wd * 0.3);
+          const px = clamp((v.x * 0.5 + 0.5) * wd, padX, wd - padX), py = clamp((-v.y * 0.5 + 0.5) * h, 70, h - 70);
           btn.current.style.transform = `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%)`;
           if (btnLanded !== st.landed) {
             btnLanded = st.landed;
@@ -2675,14 +2761,21 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         if (!shown) { shown = true; host.classList.add("is-on"); }
       };
 
+      let onScreen = true;
       const run = () => { if (running || dead) return; running = true; measure(); clock.getDelta(); raf = requestAnimationFrame(tick); };
       const halt = () => { running = false; cancelAnimationFrame(raf); };
       // only render while the section is on screen (and never stop in the middle of a launch)
       let vis: IntersectionObserver | null = null;
       if ("IntersectionObserver" in window) {
-        vis = new IntersectionObserver(([e]) => { if (e.isIntersecting || st.boarding) run(); else halt(); }, { rootMargin: "100px 0px" });
+        vis = new IntersectionObserver(([e]) => {
+          onScreen = e.isIntersecting;
+          if ((e.isIntersecting || st.boarding) && !document.hidden) run(); else halt();
+        }, { rootMargin: "100px 0px" });
         vis.observe(section);
       } else run();
+      // pause everything while the tab is in the background
+      const onVisibility = () => { if (document.hidden) halt(); else if (onScreen || st.boarding) run(); };
+      document.addEventListener("visibilitychange", onVisibility);
 
       /* ---------- deferred world building: the first frame shows only planet + stars, the rest streams in ---------- */
       const queue: (() => void)[] = [];
@@ -2702,7 +2795,9 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       const pump = () => {
         if (dead) return;
         const t0 = performance.now();
-        while (queue.length && performance.now() - t0 < 8) queue.shift()!();
+        // smaller slices on the low tier so a slow CPU never blocks a frame for long
+        const slice = Q.low ? 5 : 8;
+        while (queue.length && performance.now() - t0 < slice) queue.shift()!();
         if (queue.length) idle(pump); else finish();
       };
 
@@ -2778,6 +2873,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       return () => {
         dead = true;
         halt(); vis?.disconnect(); unlock();
+        document.removeEventListener("visibilitychange", onVisibility);
         cancelAnimationFrame(rzRaf);
         window.removeEventListener("resize", onResize);
         renderer.domElement.removeEventListener("pointerdown", onDown);
@@ -2853,12 +2949,19 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
             </p>
             <label>
               Your name
-              <input value={name} maxLength={18} onChange={(e) => setName(e.target.value)} placeholder="Enter your name" />
+              <input
+                value={name}
+                maxLength={18}
+                autoComplete="given-name"
+                enterKeyHint="next"
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Enter your name"
+              />
             </label>
             <label>
               Your country
               <span className="st-cta__select">
-                {code && <img src={`https://flagcdn.com/w40/${code.toLowerCase()}.png`} alt="" decoding="async" />}
+                {code && <img src={`https://flagcdn.com/w40/${code.toLowerCase()}.png`} alt="" width={24} height={16} decoding="async" />}
                 <select value={code} onChange={(e) => setCode(e.target.value)}>
                   <option value="">Select your country</option>
                   {countries.map((c) => (

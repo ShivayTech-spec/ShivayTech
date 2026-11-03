@@ -1,49 +1,76 @@
 "use client"
 
-import React, { Suspense, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import React, { Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { OrbitControls, PerformanceMonitor, useTexture } from "@react-three/drei"
 import * as THREE from "three"
 
 const RADIUS = 9
 const IMAGE_SIZE = 1.5
-// The page is locked while the hero plays (wheel / touch drive it), then normal scrolling is released.
-const SCROLL_DISTANCE = 250 // px of wheel/touch input the circle needs to open up
-const ZOOM_DISTANCE = 400 // extra px of wheel/touch input used to zoom the center circle over the screen
-const HOLD_DISTANCE = 600 // px of wheel/touch input AFTER the circle is fully open, before the zoom starts (the opened circle stays on screen)
+// The page is locked while the hero plays (wheel / touch / keys drive it), then normal scrolling is released.
+const SCROLL_DISTANCE = 250 // px of input the circle needs to open up
+const ZOOM_DISTANCE = 400 // extra px of input used to zoom the center circle over the screen
+const HOLD_DISTANCE = 600 // px of input AFTER the circle is fully open, before the zoom starts
 const TOTAL_SCROLL = SCROLL_DISTANCE + HOLD_DISTANCE + ZOOM_DISTANCE
-const TILT = 10 // degrees, top leans away from the viewer (negative = other way)
+const TILT = 10 // degrees, top leans away from the viewer
+const TOUCH_FORWARD = 4 // finger travel multiplier (scrolling down)
+const TOUCH_BACK = 6 // finger travel multiplier (scrolling back up)
 
 // SIZE OF THE BIG CENTER CIRCLE (px) - change this one number to resize it
 const CENTER_SIZE = 320
 
-// How far (fraction of hero height) the circle + orbit sit ABOVE the screen center, so the text/buttons fit under the circle.
-// Set to 0 to put everything back to the exact center.
+// Fraction of hero height the circle + orbit sit ABOVE the screen center (room for text/buttons under the circle)
 const STAGE_SHIFT = 0.12
-// Same thing, but for while the circle is opened (after scrolling): 0 = exact center, negative = lower than center.
+// Same, but while the circle is opened: 0 = exact center
 const STAGE_SHIFT_OPEN = 0
 
-// 3D tile settings
-const TILE_DEPTH = 0.01 // slab thickness
-const TILE_BEVEL = 0.02 // edge bevel size
-const TILE_RADIUS = 0.02 // corner roundness
+// ---- Responsive design reference ----
+// DOM layer scales down on small screens: scale = min(1, width / DESIGN_WIDTH, height / DESIGN_HEIGHT)
+const DESIGN_WIDTH = 700
+const DESIGN_HEIGHT = 720
+const REF_HEIGHT = 1080 // the height the 3D orbit was tuned at
+const MOBILE_ORBIT_ZOOM = 0.85 // extra shrink of the 3D orbit on screens <= 768px wide (smaller = more of the ring visible)
+
+// ---- Low-end device handling ----
+type Tier = "low" | "mid" | "high"
+type Env = { tier: Tier; coarse: boolean; reduced: boolean }
+
+const PARTICLES: Record<Tier, number> = { low: 250, mid: 700, high: 1500 }
+const DPR: Record<Tier, number | [number, number]> = { low: 1, mid: [1, 1.25], high: [1, 1.5] }
+const LOW_FPS = 30 // low tier renders at 30fps (half the GPU work)
+
+function detectEnv(): Env {
+  const nav = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } }
+  const mem = nav.deviceMemory ?? 8
+  const cores = nav.hardwareConcurrency ?? 8
+  const saveData = !!nav.connection?.saveData
+  const coarse = window.matchMedia("(pointer: coarse)").matches
+  const small = window.matchMedia("(max-width: 768px)").matches
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  let tier: Tier = "high"
+  if (saveData || mem <= 4 || cores <= 4) tier = "low"
+  else if (coarse || small) tier = mem >= 8 && cores >= 6 ? "mid" : "low"
+  return { tier, coarse, reduced }
+}
+
+const designScale = (w: number, h: number) => Math.max(0.3, Math.min(1, w / DESIGN_WIDTH, h / DESIGN_HEIGHT))
+
+// Tile settings
+const TILE_DEPTH = 0.01
+const TILE_BEVEL = 0.02
+const TILE_RADIUS = 0.02
 const FACE_Z = TILE_DEPTH / 2 + TILE_BEVEL + 0.002
 
 // Orbit position switching
-const VIEW_INTERVAL = 12000 // ms between position changes
-const USER_PAUSE = 4000 // ms after the user lets go before auto-change can happen again
-// Camera polar angle in degrees (0 = straight down, 90 = level, 180 = straight up), in order:
-// 1) from far below looking almost straight up (near side on top),
-// 2) almost top-down (ring face-on), 3) from above (near side at the bottom)
+const VIEW_INTERVAL = 12000
+const USER_PAUSE = 4000
 const VIEW_ANGLES = [68, 105, 200]
 
-// const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 
 // Video that fills the big center circle (put your file in /public/videos/)
 const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
-
-// Optional poster shown until the video loads (falls back to the dark gradient if empty/missing)
+// Poster shown until the video loads (and the ONLY thing shown on low-end devices)
 const DEFAULT_CENTER_IMAGE = "/images/hero.png"
 
 const PROFILES = [
@@ -65,17 +92,14 @@ const CARD_ANGLES = PROFILES.map((_, i) => {
 // ---- Canvas config hoisted so React never re-creates these objects ----
 const CANVAS_STYLE: React.CSSProperties = { position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }
 const CANVAS_STYLE_COVERED: React.CSSProperties = { ...CANVAS_STYLE, pointerEvents: "none" }
-const CANVAS_CAMERA = { position: [-9.3, 5.3, 9.3] as [number, number, number], fov: 50 }
-const CANVAS_GL = { antialias: false, powerPreference: "high-performance" as const, alpha: true }
-const CANVAS_DPR: [number, number] = [1, 1.5]
-const CANVAS_RESIZE = { scroll: false } // no re-measure / canvas reset on every page scroll
+const CANVAS_CAMERA = { position: [-9.3, 5.3, 9.3] as [number, number, number], fov: 50, near: 1, far: 80 }
+const GL_LOW = { antialias: false, alpha: true, stencil: false, powerPreference: "low-power" as const }
+const GL_FULL = { antialias: false, alpha: true, stencil: false, powerPreference: "high-performance" as const }
+const CANVAS_RESIZE = { scroll: false }
 const onCanvasCreated = ({ gl }: { gl: THREE.WebGLRenderer }) => gl.setClearColor(0x000000, 0)
 
 // Catches errors (like a missing texture file) so they can't crash the whole 3D scene
-class SafeBoundary extends React.Component<
-  { children: React.ReactNode; name: string },
-  { failed: boolean }
-> {
+class SafeBoundary extends React.Component<{ children: React.ReactNode; name: string }, { failed: boolean }> {
   state = { failed: false }
   static getDerivedStateFromError() {
     return { failed: true }
@@ -91,7 +115,7 @@ class SafeBoundary extends React.Component<
 // Soft round sprite so particles render as glowing dots, not squares
 function useDotTexture() {
   const tex = useMemo(() => {
-    const size = 64
+    const size = 32
     const canvas = document.createElement("canvas")
     canvas.width = canvas.height = size
     const ctx = canvas.getContext("2d")!
@@ -167,9 +191,10 @@ function roundedRectShape(w: number, h: number, r: number) {
   return s
 }
 
-// Navbar-style neon for the orbit tiles: a soft outer glow sprite and an inner edge glow overlay
-function useGlowTextures() {
-  return useMemo(() => {
+// Neon glow textures (skipped entirely on low-end devices: no canvas blur work, no additive overdraw)
+function useGlowTextures(enabled: boolean) {
+  const tex = useMemo(() => {
+    if (!enabled) return null
     const rr = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
       ctx.beginPath()
       ctx.moveTo(x + r, y)
@@ -180,7 +205,6 @@ function useGlowTextures() {
       ctx.closePath()
     }
 
-    // outer glow (drawn on a plane 2x the tile size, tile occupies the middle 50%)
     const S = 256
     const outer = document.createElement("canvas")
     outer.width = outer.height = S
@@ -191,7 +215,6 @@ function useGlowTextures() {
     rr(o, S * 0.25, S * 0.25, S * 0.5, S * 0.5, 8)
     o.fill()
 
-    // inner glow (transparent centre, blue edges, laid over the image face)
     const inner = document.createElement("canvas")
     inner.width = inner.height = S
     const n = inner.getContext("2d")!
@@ -211,7 +234,16 @@ function useGlowTextures() {
     const innerTex = new THREE.CanvasTexture(inner)
     outerTex.colorSpace = innerTex.colorSpace = THREE.SRGBColorSpace
     return { outerTex, innerTex }
-  }, [])
+  }, [enabled])
+
+  useEffect(
+    () => () => {
+      tex?.outerTex.dispose()
+      tex?.innerTex.dispose()
+    },
+    [tex]
+  )
+  return tex
 }
 
 // One draw call for N copies of the same mesh (all tiles are static, so matrices are written once)
@@ -244,28 +276,38 @@ function Instances({
   )
 }
 
-const HeroImages = memo(function HeroImages({ images }: { images: string[] }) {
-  // identical URLs share ONE texture (was: one GPU texture per tile)
+const HeroImages = memo(function HeroImages({ images, tier }: { images: string[]; tier: Tier }) {
+  const fx = tier !== "low" // fancy neon layers + lit materials only when the device can afford them
+
+  // identical URLs share ONE texture
   const unique = useMemo(() => Array.from(new Set(images)), [images])
   const textures = useTexture(unique) as THREE.Texture[]
-  const { outerTex, innerTex } = useGlowTextures()
+  const glowTex = useGlowTextures(fx)
+
+  // lighter texture sampling on low-end (no mipmaps = less GPU memory + upload time)
+  useLayoutEffect(() => {
+    for (const t of textures) {
+      t.anisotropy = 1
+      t.generateMipmaps = fx
+      t.minFilter = fx ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter
+      t.needsUpdate = true
+    }
+  }, [textures, fx])
 
   const { bodyGeo, faceGeo, glowGeo } = useMemo(() => {
-    // thick beveled slab
     const bodySize = IMAGE_SIZE - TILE_BEVEL * 2
     const bodyGeo = new THREE.ExtrudeGeometry(roundedRectShape(bodySize, bodySize, TILE_RADIUS), {
       depth: TILE_DEPTH,
       bevelEnabled: true,
       bevelThickness: TILE_BEVEL,
       bevelSize: TILE_BEVEL,
-      bevelSegments: 2,
-      curveSegments: 6,
+      bevelSegments: fx ? 2 : 1,
+      curveSegments: fx ? 6 : 3,
     })
     bodyGeo.translate(0, 0, -TILE_DEPTH / 2)
 
-    // rounded image face, inset so the bevel rim stays visible
     const faceSize = IMAGE_SIZE - 0.14
-    const faceGeo = new THREE.ShapeGeometry(roundedRectShape(faceSize, faceSize, TILE_RADIUS * 0.8), 6)
+    const faceGeo = new THREE.ShapeGeometry(roundedRectShape(faceSize, faceSize, TILE_RADIUS * 0.8), fx ? 6 : 3)
     const pos = faceGeo.attributes.position
     const uv = faceGeo.attributes.uv
     for (let i = 0; i < pos.count; i++) {
@@ -273,11 +315,10 @@ const HeroImages = memo(function HeroImages({ images }: { images: string[] }) {
     }
     uv.needsUpdate = true
 
-    const glowGeo = new THREE.PlaneGeometry(IMAGE_SIZE * 2, IMAGE_SIZE * 2)
+    const glowGeo = fx ? new THREE.PlaneGeometry(IMAGE_SIZE * 2, IMAGE_SIZE * 2) : null
     return { bodyGeo, faceGeo, glowGeo }
-  }, [])
+  }, [fx])
 
-  // per-tile matrices, grouped by part (and by texture for the image faces)
   const parts = useMemo(() => {
     const n = images.length
     const indexOf = new Map(unique.map((u, i) => [u, i]))
@@ -321,49 +362,51 @@ const HeroImages = memo(function HeroImages({ images }: { images: string[] }) {
     () => () => {
       bodyGeo.dispose()
       faceGeo.dispose()
-      glowGeo.dispose()
-      outerTex.dispose()
-      innerTex.dispose()
+      glowGeo?.dispose()
     },
-    [bodyGeo, faceGeo, glowGeo, outerTex, innerTex]
+    [bodyGeo, faceGeo, glowGeo]
   )
 
   if (!images.length) return null
 
   return (
     <>
-      {/* outer neon glow (sits inside the slab, so only the part past the edges shows) */}
-      <Instances geometry={glowGeo} matrices={parts.glow}>
-        <meshBasicMaterial
-          map={outerTex}
-          transparent
-          opacity={0.85}
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          side={THREE.DoubleSide}
-          toneMapped={false}
-        />
-      </Instances>
+      {/* outer neon glow (high/mid only) */}
+      {fx && glowTex && glowGeo && (
+        <Instances geometry={glowGeo} matrices={parts.glow}>
+          <meshBasicMaterial
+            map={glowTex.outerTex}
+            transparent
+            opacity={0.85}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+            toneMapped={false}
+          />
+        </Instances>
+      )}
 
-      {/* neon rim: the bevel edge around the image */}
+      {/* neon rim: lit material on capable devices, flat unlit blue on low-end (no lights needed) */}
       <Instances geometry={bodyGeo} matrices={parts.body}>
-        <meshStandardMaterial
-          color="#0b0e16"
-          metalness={0.4}
-          roughness={0.4}
-          emissive="#1a8cff"
-          emissiveIntensity={1.6}
-        />
+        {fx ? (
+          <meshStandardMaterial
+            color="#0b0e16"
+            metalness={0.4}
+            roughness={0.4}
+            emissive="#1a8cff"
+            emissiveIntensity={1.6}
+          />
+        ) : (
+          <meshBasicMaterial color="#1f7fff" toneMapped={false} />
+        )}
       </Instances>
 
       {textures.map((map, g) =>
         parts.front[g].length ? (
           <React.Fragment key={g}>
-            {/* front */}
             <Instances geometry={faceGeo} matrices={parts.front[g]}>
               <meshBasicMaterial map={map} toneMapped={false} />
             </Instances>
-            {/* back (so tiles on the far side still show the image) */}
             <Instances geometry={faceGeo} matrices={parts.back[g]}>
               <meshBasicMaterial map={map} toneMapped={false} />
             </Instances>
@@ -371,38 +414,36 @@ const HeroImages = memo(function HeroImages({ images }: { images: string[] }) {
         ) : null
       )}
 
-      {/* front inner glow */}
-      <Instances geometry={faceGeo} matrices={parts.frontGlow}>
-        <meshBasicMaterial
-          map={innerTex}
-          transparent
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </Instances>
-
-      {/* back inner glow */}
-      <Instances geometry={faceGeo} matrices={parts.backGlow}>
-        <meshBasicMaterial
-          map={innerTex}
-          transparent
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </Instances>
+      {fx && glowTex && (
+        <>
+          <Instances geometry={faceGeo} matrices={parts.frontGlow}>
+            <meshBasicMaterial
+              map={glowTex.innerTex}
+              transparent
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+              toneMapped={false}
+            />
+          </Instances>
+          <Instances geometry={faceGeo} matrices={parts.backGlow}>
+            <meshBasicMaterial
+              map={glowTex.innerTex}
+              transparent
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+              toneMapped={false}
+            />
+          </Instances>
+        </>
+      )}
     </>
   )
 })
 
 // Every VIEW_INTERVAL ms, smoothly moves the camera to the next polar angle.
-// Only the up/down angle is changed, so the auto-rotate keeps spinning the orbit.
-// The user can drag any time: dragging cancels the glide, and the next auto-change
-// waits until they've let go for a moment.
 function CameraRig({ controls }: { controls: React.MutableRefObject<any> }) {
   const index = useRef(0)
-  const gliding = useRef(true) // true while moving toward the current target angle
+  const gliding = useRef(true)
   const dragging = useRef(false)
   const lastRelease = useRef(0)
   const spherical = useMemo(() => new THREE.Spherical(), [])
@@ -448,35 +489,47 @@ function CameraRig({ controls }: { controls: React.MutableRefObject<any> }) {
   return null
 }
 
-// `progress.current` is 0 when the scroll starts and 1 when it finishes
-function HeroScrollAnimation({ progress }: { progress: React.MutableRefObject<number> }) {
-  useFrame(() => {
-    const p = progress.current
-    // SCROLL ANIMATION CODE GOES HERE
-    void p
-  })
+// Low-end devices render at a fixed 30fps. The Canvas runs with frameloop="never" and this drives it manually.
+function FrameLimiter({ fps }: { fps: number }) {
+  const advance = useThree((s) => s.advance)
+  const get = useThree((s) => s.get)
+  useEffect(() => {
+    let raf = 0
+    let last = 0
+    const step = 1000 / fps - 2
+    const loop = (t: number) => {
+      raf = requestAnimationFrame(loop)
+      if (t - last < step) return
+      const dt = Math.min((t - last) / 1000, 0.1) // cap so resuming never causes a jump
+      last = t
+      advance(get().clock.elapsedTime + dt)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [advance, get, fps])
   return null
 }
 
-// Lowers pixel ratio only if the device actually struggles, raises it back when it recovers
-function AdaptiveQuality() {
+// Lowers pixel ratio if the device struggles; if it keeps struggling, drops the whole scene to the low tier
+function AdaptiveQuality({ onFallback }: { onFallback: () => void }) {
   const setDpr = useThree((s) => s.setDpr)
   return (
     <PerformanceMonitor
       flipflops={3}
-      onChange={({ factor }) =>
-        setDpr(Math.min(window.devicePixelRatio || 1, THREE.MathUtils.lerp(1, 1.5, factor)))
-      }
-      onFallback={() => setDpr(1)}
+      onChange={({ factor }) => setDpr(Math.min(window.devicePixelRatio || 1, THREE.MathUtils.lerp(1, 1.5, factor)))}
+      onFallback={() => {
+        setDpr(1)
+        onFallback()
+      }}
     />
   )
 }
 
-// Shifts the 3D scene up on screen (without resizing it) so it lines up with the shifted center circle.
-// `shift` is the same animated value the circle uses, so the orbit and the circle always move together.
-// Only touches the projection matrix when the shift or canvas size actually changed.
+// Shifts the 3D scene up (without resizing it) to line up with the shifted center circle, and shrinks the
+// orbit on narrow screens so it matches the scaled-down DOM circle. Only touches the projection when something changed.
 function StageOffset({ shift }: { shift: React.MutableRefObject<number> }) {
-  const { camera, size } = useThree()
+  const camera = useThree((s) => s.camera)
+  const size = useThree((s) => s.size)
   const last = useRef({ s: NaN, w: 0, h: 0 })
   useFrame(() => {
     const s = shift.current
@@ -486,11 +539,16 @@ function StageOffset({ shift }: { shift: React.MutableRefObject<number> }) {
     l.w = size.width
     l.h = size.height
     const cam = camera as THREE.PerspectiveCamera
+    cam.zoom =
+      size.width <= 768
+        ? THREE.MathUtils.clamp(((REF_HEIGHT * designScale(size.width, size.height)) / size.height) * MOBILE_ORBIT_ZOOM, 0.35, 1.2)
+        : 1
     cam.setViewOffset(size.width, size.height, 0, size.height * s, size.width, size.height)
   })
   useEffect(
     () => () => {
       const cam = camera as THREE.PerspectiveCamera
+      cam.zoom = 1
       cam.clearViewOffset()
       cam.updateProjectionMatrix()
     },
@@ -532,50 +590,29 @@ const createEls = (): Els => ({
 })
 
 const CENTER: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "center" }
-
-// same neon glow as the navbar (outer glow, wide ambient glow, inner glow, bright inner top edge)
-const NEON =
-  "0 0 25px rgba(0,110,255,0.5), 0 0 60px rgba(0,110,255,0.15), inset 0 0 30px rgba(0,110,255,0.25), inset 0 2px 8px rgba(0,110,255,0.4)"
-
-// brighter, controlled glow for the main emblem rim
-const EMBLEM_GLOW =
-  "0 0 14px rgba(0,200,255,0.9), 0 0 34px rgba(0,143,255,0.7), 0 0 80px rgba(0,107,255,0.4), inset 0 0 12px rgba(0,200,255,0.5)"
-
-const CARD_GLOW = "0 0 8px rgba(255,255,255,0.6), 0 0 25px rgba(255,255,255,0.5), 0 0 60px rgba(255,255,255,0.15)"
-
-// Ring borders/glows live on their own overlay so only `opacity` (compositor-only) animates
-const RING: React.CSSProperties = {
-  position: "absolute",
-  inset: 0,
-  boxSizing: "border-box",
-  borderRadius: "50%",
-  border: "2px solid rgba(0,110,255,0.9)",
-  boxShadow: NEON,
-  opacity: 0,
-  transition: "opacity 0.5s",
-  pointerEvents: "none",
-}
-
+const FILL: React.CSSProperties = { width: "100%", height: "100%", objectFit: "cover", display: "block" }
 const RADIUS_VAR = `var(--r, ${CENTER_SIZE / 2}px)` // set once per frame on the emblem, inherited by its children
 
 const circleGradient =
   "radial-gradient(circle at 50% 35%, rgba(10,26,92,0.92) 0%, rgba(5,11,42,0.94) 60%, rgba(2,4,15,0.96) 100%)"
 
-// Center section that sits inside the orbit
 const HeroCenter = memo(function HeroCenter({
   els,
   centerImage,
   centerVideo,
+  useVideo,
 }: {
   els: Els
   centerImage?: string
   centerVideo?: string
+  useVideo: boolean
 }) {
   return (
     <div
       ref={(el) => {
         els.centerRoot = el
       }}
+      className="hero-center"
       style={{
         ...CENTER,
         position: "absolute",
@@ -584,7 +621,7 @@ const HeroCenter = memo(function HeroCenter({
         pointerEvents: "none",
         perspective: 1200,
         willChange: "transform",
-        transform: `translateY(${-STAGE_SHIFT * 1080}px)`,
+        transform: `translateY(${-STAGE_SHIFT * 100}%)`,
       }}
     >
       <div
@@ -598,14 +635,14 @@ const HeroCenter = memo(function HeroCenter({
             ref={(el) => {
               els.ring600 = el
             }}
-            style={RING}
+            className="hero-ring"
           />
           <div style={{ ...CENTER, position: "relative", width: 500, height: 500, borderRadius: "50%" }}>
             <div
               ref={(el) => {
                 els.ring500 = el
               }}
-              style={RING}
+              className="hero-ring"
             />
             <div
               ref={(el) => {
@@ -622,18 +659,11 @@ const HeroCenter = memo(function HeroCenter({
                 background: "linear-gradient(135deg, #b5ecff, #1a9bff, #006bff)",
               }}
             >
-              {/* emblem rim glow (own layer, only its opacity animates) */}
               <div
                 ref={(el) => {
                   els.emblemGlow = el
                 }}
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  borderRadius: RADIUS_VAR,
-                  boxShadow: EMBLEM_GLOW,
-                  pointerEvents: "none",
-                }}
+                className="hero-emblem-glow"
               />
               <div
                 style={{
@@ -642,70 +672,41 @@ const HeroCenter = memo(function HeroCenter({
                   width: "100%",
                   height: "100%",
                   borderRadius: RADIUS_VAR,
-                  // gradient underneath as a fallback while the video loads
                   background: circleGradient,
                 }}
               >
-                {/* video fills the whole circle */}
-                {centerVideo && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: RADIUS_VAR,
-                      overflow: "hidden", // clips only the video, not the profile cards
-                    }}
-                  >
-                    <video
-                      ref={(el) => {
-                        els.video = el
-                      }}
-                      src={centerVideo}
-                      poster={centerImage || undefined}
-                      autoPlay
-                      muted
-                      loop
-                      playsInline
-                      preload="auto"
-                      disablePictureInPicture
-                      disableRemotePlayback
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                        display: "block",
-                      }}
-                    />
+                {/* poster image (always) + video on top (only on capable devices, after the page is idle) */}
+                {(centerImage || (centerVideo && useVideo)) && (
+                  <div style={{ position: "absolute", inset: 0, borderRadius: RADIUS_VAR, overflow: "hidden" }}>
+                    {centerImage && <img src={centerImage} alt="" decoding="async" draggable={false} style={FILL} />}
+                    {centerVideo && useVideo && (
+                      <video
+                        ref={(el) => {
+                          els.video = el
+                        }}
+                        src={centerVideo}
+                        autoPlay
+                        muted
+                        loop
+                        playsInline
+                        preload="metadata"
+                        disablePictureInPicture
+                        disableRemotePlayback
+                        style={{ ...FILL, position: "absolute", inset: 0 }}
+                      />
+                    )}
                   </div>
                 )}
 
                 {PROFILES.map((src, i) => (
                   <div
-                    key={i}
+                    key={src}
                     ref={(el) => {
                       els.cards[i] = el
                     }}
-                    style={{
-                      position: "absolute",
-                      width: 96,
-                      height: 96,
-                      borderRadius: 16,
-                      overflow: "hidden",
-                      border: "4px solid #1f2937",
-                      // white glow (outer layers only; inset layers would be hidden under the image)
-                      boxShadow: CARD_GLOW,
-                      transition: "transform 0.3s ease-out",
-                      willChange: "transform, opacity",
-                      transform: "translate3d(0px, 0px, 0)",
-                    }}
+                    className="hero-card"
                   >
-                    <img
-                      src={src}
-                      alt={`Profile ${i + 1}`}
-                      decoding="async"
-                      draggable={false}
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    />
+                    <img src={src} alt="" width={96} height={96} decoding="async" draggable={false} style={FILL} />
                   </div>
                 ))}
 
@@ -723,11 +724,7 @@ const HeroCenter = memo(function HeroCenter({
                     transition: "opacity 0.5s",
                   }}
                 >
-                  {/* <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 8px" }}>Empowering</h1> */}
-                  {/* <h1 style={{ fontSize: 36, fontWeight: 700, color: "#fff", margin: "0 0 16px" }}>Every User</h1> */}
-                  {/* <p style={{ maxWidth: 320, color: "#9ca3af", margin: 0 }}>
-                    From entrepreneurs to educators, Gen AI provides tools to simplify work.
-                  </p> */}
+                  {/* <h1 ...>Empowering</h1> ... put center text here if you want it */}
                 </div>
               </div>
             </div>
@@ -783,35 +780,75 @@ const SERVICES: { label: string; icon: React.ReactNode }[] = [
   },
 ]
 
-// Prefixed with .hero-root so they beat the section rule that clears div backgrounds
+// All styling lives here (classes) so the low-end tier can swap heavy effects with one attribute: data-tier="low".
+// Prefixed with .hero-root so they beat the section rule that clears div backgrounds.
 const HERO_CSS = `
+.hero-root{position:relative;width:100%;height:100vh;height:100svh;overflow:hidden;background:radial-gradient(ellipse 70% 55% at 50% 42%,#0a1a5c 0%,#050b2a 40%,#02040f 70%,#000 100%);-webkit-tap-highlight-color:transparent}
+.hero-root:not([data-ready]) .hero-center,.hero-root:not([data-ready]) .hero-content{opacity:0}
 .hero-root div{background-color:transparent}
-.hero-root canvas{background:transparent !important}
+.hero-root canvas{background:transparent !important;display:block}
+.hero-root .hero-bottom-glow{position:absolute;left:0;right:0;bottom:0;height:33%;pointer-events:none;background:radial-gradient(ellipse 60% 100% at 50% 100%,rgba(30,80,255,.35) 0%,rgba(30,80,255,0) 70%)}
+.hero-root .hero-ring{position:absolute;inset:0;box-sizing:border-box;border-radius:50%;border:2px solid rgba(0,110,255,.9);box-shadow:0 0 25px rgba(0,110,255,.5),0 0 60px rgba(0,110,255,.15),inset 0 0 30px rgba(0,110,255,.25),inset 0 2px 8px rgba(0,110,255,.4);opacity:0;transition:opacity .5s;pointer-events:none}
+.hero-root .hero-emblem-glow{position:absolute;inset:0;border-radius:var(--r,160px);pointer-events:none;box-shadow:0 0 14px rgba(0,200,255,.9),0 0 34px rgba(0,143,255,.7),0 0 80px rgba(0,107,255,.4),inset 0 0 12px rgba(0,200,255,.5)}
+.hero-root .hero-card{position:absolute;width:96px;height:96px;border-radius:16px;overflow:hidden;border:4px solid #1f2937;box-shadow:0 0 8px rgba(255,255,255,.6),0 0 25px rgba(255,255,255,.5),0 0 60px rgba(255,255,255,.15);transition:transform .3s ease-out;will-change:transform,opacity;transform:translate3d(0,0,0)}
+.hero-root .hero-content{position:absolute;left:0;right:0;top:calc(${(0.5 - STAGE_SHIFT) * 100}% + ${CENTER_SIZE / 2}px * var(--s,1));bottom:0;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;text-align:center;padding:clamp(4px,1vh,12px) 20px env(safe-area-inset-bottom,0px);font-family:var(--font-montserrat,inherit);will-change:opacity,transform;pointer-events:none}
+.hero-root .hero-title-wrap{position:relative;max-width:100%}
+.hero-root .hero-h1{margin:0;font-size:clamp(26px,min(2.8vw,5.8vh),56px);font-weight:800;line-height:1.08;letter-spacing:-.01em}
+.hero-root .hero-h-a,.hero-root .hero-h-b{display:block;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+.hero-root .hero-h-a{background-image:linear-gradient(180deg,#fff 0%,#e6ecf7 40%,#8fa0bd 100%);filter:drop-shadow(0 2px 4px rgba(0,0,0,.7)) drop-shadow(0 0 10px rgba(180,200,235,.25))}
+.hero-root .hero-h-b{font-style:italic;background-image:linear-gradient(180deg,#5cc3ff 0%,#1a8cff 45%,#006bff 100%);filter:drop-shadow(0 0 8px rgba(0,143,255,.85)) drop-shadow(0 0 22px rgba(0,107,255,.55))}
+.hero-root .hero-swoosh{position:absolute;left:40%;bottom:-14px;width:48%;height:14px;filter:drop-shadow(0 0 3px rgba(0,200,255,.9)) drop-shadow(0 0 8px rgba(0,143,255,.7))}
 .hero-root .hero-services{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:clamp(18px,3vh,28px);padding:clamp(8px,1.2vh,12px) clamp(10px,1.4vw,26px);border-radius:999px;border:2px solid #1a8cff;background:rgba(2,8,23,.75);box-shadow:0 0 10px rgba(26,140,255,.9),0 0 28px rgba(0,107,255,.5),inset 0 0 14px rgba(0,143,255,.35)}
 .hero-root .hero-services-item{display:flex;align-items:center;gap:10px;padding:4px clamp(12px,1.4vw,26px);font-size:clamp(13px,.95vw,18px);font-weight:500;color:#fff;white-space:nowrap}
+.hero-root .hero-services-item svg{flex-shrink:0}
 .hero-root .hero-services-item + .hero-services-item{border-left:1px solid rgba(198,213,234,.3)}
 .hero-root .hero-cta-row{display:flex;flex-wrap:wrap;justify-content:center;gap:clamp(12px,1.2vw,22px);margin-top:clamp(12px,2vh,20px)}
-.hero-root .hero-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:clamp(44px,6vh,58px);padding:0 clamp(24px,2.2vw,40px);border-radius:999px;font-size:clamp(14px,1vw,18px);font-weight:600;color:#fff;text-decoration:none;white-space:nowrap;cursor:pointer;transition:box-shadow .25s ease,transform .25s ease,border-color .25s ease}
+.hero-root .hero-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:clamp(44px,6vh,58px);padding:0 clamp(24px,2.2vw,40px);border-radius:999px;font-size:clamp(14px,1vw,18px);font-weight:600;color:#fff;text-decoration:none;white-space:nowrap;cursor:pointer;touch-action:manipulation;transition:box-shadow .25s ease,transform .25s ease,border-color .25s ease}
+.hero-root .hero-btn svg{flex-shrink:0}
 .hero-root .hero-btn-primary{background:linear-gradient(180deg,#2a9bff 0%,#0a6bff 50%,#0537c9 100%);border:2px solid #3fc8ff;box-shadow:0 0 12px rgba(0,200,255,.7),0 0 32px rgba(0,120,255,.65),0 0 70px rgba(0,80,255,.3),inset 0 1px 0 rgba(255,255,255,.45),inset 0 0 16px rgba(0,200,255,.35)}
-.hero-root .hero-btn-primary:hover{transform:translateY(-1px);border-color:#8fe6ff;box-shadow:0 0 16px rgba(0,220,255,.9),0 0 42px rgba(0,140,255,.8),0 0 90px rgba(0,80,255,.4),inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 20px rgba(0,200,255,.5)}
 .hero-root .hero-btn-secondary{background:rgba(2,6,20,.8);border:2px solid #2a86ff;box-shadow:0 0 12px rgba(26,140,255,.7),0 0 30px rgba(0,107,255,.35),inset 0 0 14px rgba(0,107,255,.3)}
+@media (hover:hover){
+.hero-root .hero-btn-primary:hover{transform:translateY(-1px);border-color:#8fe6ff;box-shadow:0 0 16px rgba(0,220,255,.9),0 0 42px rgba(0,140,255,.8),0 0 90px rgba(0,80,255,.4),inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 20px rgba(0,200,255,.5)}
 .hero-root .hero-btn-secondary:hover{transform:translateY(-1px);border-color:#5aa8ff;box-shadow:0 0 18px rgba(26,140,255,.9),0 0 40px rgba(0,107,255,.5),inset 0 0 18px rgba(0,107,255,.4)}
-@media (max-width:640px){
-.hero-root .hero-services{border-radius:22px}
-.hero-root .hero-services-item{padding:6px 12px}
-.hero-root .hero-services-item + .hero-services-item{border-left:none}
-.hero-root .hero-cta-row{gap:12px}
 }
-`
+.hero-root .hero-btn:active{transform:scale(.97)}
 
-const gradText = (bg: string, glow: string): React.CSSProperties => ({
-  background: bg,
-  WebkitBackgroundClip: "text",
-  backgroundClip: "text",
-  WebkitTextFillColor: "transparent",
-  color: "transparent",
-  filter: glow,
-})
+/* ---- tablets + phones: 2x2 services grid, side-by-side buttons ---- */
+@media (max-width:820px){
+.hero-root .hero-content{padding-left:16px;padding-right:16px}
+.hero-root .hero-h1{font-size:clamp(24px,7vw,40px)}
+.hero-root .hero-services{display:grid;grid-template-columns:1fr 1fr;width:min(100%,360px);margin-top:clamp(16px,2.6vh,24px);padding:6px 8px;border-radius:22px}
+.hero-root .hero-services-item{padding:7px 8px;gap:8px;font-size:13px}
+.hero-root .hero-services-item + .hero-services-item{border-left:none}
+.hero-root .hero-services-item svg{width:18px;height:18px}
+.hero-root .hero-cta-row{flex-wrap:nowrap;width:min(100%,360px);gap:10px;margin-top:clamp(12px,2vh,18px)}
+.hero-root .hero-btn{flex:1 1 0;min-width:0;height:46px;padding:0 10px;gap:6px;font-size:14px}
+.hero-root .hero-btn svg{width:16px;height:16px}
+}
+@media (max-width:360px){
+.hero-root .hero-services-item{font-size:12px;padding:6px}
+.hero-root .hero-btn{font-size:13px;padding:0 6px}
+}
+/* short screens (landscape phones, small laptops) */
+@media (max-height:560px){
+.hero-root .hero-h1{font-size:clamp(20px,5.2vh,32px)}
+.hero-root .hero-services{margin-top:12px}
+.hero-root .hero-services-item{padding-top:3px;padding-bottom:3px}
+.hero-root .hero-btn{height:40px}
+.hero-root .hero-cta-row{margin-top:10px}
+}
+
+/* ---- LOW-END TIER: swap big blurs/filters for cheap shadows (painting big box-shadows is what lags weak GPUs) ---- */
+.hero-root[data-tier="low"] .hero-ring{box-shadow:0 0 16px rgba(0,110,255,.5),inset 0 0 18px rgba(0,110,255,.25)}
+.hero-root[data-tier="low"] .hero-emblem-glow{box-shadow:0 0 14px rgba(0,200,255,.8),0 0 30px rgba(0,143,255,.45)}
+.hero-root[data-tier="low"] .hero-card{box-shadow:0 0 10px rgba(255,255,255,.45);transition:none}
+.hero-root[data-tier="low"] .hero-h-a,.hero-root[data-tier="low"] .hero-h-b,.hero-root[data-tier="low"] .hero-swoosh{filter:none}
+.hero-root[data-tier="low"] .hero-services{box-shadow:0 0 10px rgba(26,140,255,.7)}
+.hero-root[data-tier="low"] .hero-btn-primary{box-shadow:0 0 12px rgba(0,160,255,.6),inset 0 1px 0 rgba(255,255,255,.35)}
+.hero-root[data-tier="low"] .hero-btn-secondary{box-shadow:0 0 10px rgba(26,140,255,.55)}
+.hero-root[data-tier="low"] .hero-bottom-glow{display:none}
+@media (prefers-reduced-motion:reduce){.hero-root *{transition:none !important}}
+`
 
 const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
   return (
@@ -819,73 +856,14 @@ const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
       ref={(el) => {
         els.content = el
       }}
-      style={{
-        position: "absolute",
-        left: 0,
-        right: 0,
-        // starts at the bottom edge of the (shifted) center circle and runs to the bottom of the hero
-        top: `calc(${(0.5 - STAGE_SHIFT) * 100}% + ${CENTER_SIZE / 2}px)`,
-        bottom: 0,
-        zIndex: 20,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "flex-start",
-        textAlign: "center",
-        padding: "clamp(4px, 1vh, 12px) 20px 0",
-        fontFamily: "var(--font-montserrat, inherit)", // picks up Montserrat automatically if you load it with that variable
-        willChange: "opacity, transform",
-        pointerEvents: "none",
-      }}
+      className="hero-content"
     >
-      {/* headline */}
-      <div style={{ position: "relative" }}>
-        <h1
-          style={{
-            margin: 0,
-            fontSize: "clamp(26px, min(2.8vw, 5.8vh), 56px)",
-            fontWeight: 800,
-            lineHeight: 1.08,
-            letterSpacing: "-0.01em",
-          }}
-        >
-          <span
-            style={{
-              display: "block",
-              ...gradText(
-                "linear-gradient(180deg, #ffffff 0%, #e6ecf7 40%, #8fa0bd 100%)",
-                "drop-shadow(0 2px 4px rgba(0,0,0,0.7)) drop-shadow(0 0 10px rgba(180,200,235,0.25))"
-              ),
-            }}
-          >
-            Web Solutions That
-          </span>
-          <span
-            style={{
-              display: "block",
-              fontStyle: "italic",
-              ...gradText(
-                "linear-gradient(180deg, #5cc3ff 0%, #1a8cff 45%, #006bff 100%)",
-                "drop-shadow(0 0 8px rgba(0,143,255,0.85)) drop-shadow(0 0 22px rgba(0,107,255,0.55))"
-              ),
-            }}
-          >
-            Grow Your Business.
-          </span>
+      <div className="hero-title-wrap">
+        <h1 className="hero-h1">
+          <span className="hero-h-a">Web Solutions That</span>
+          <span className="hero-h-b">Grow Your Business.</span>
         </h1>
-        {/* thin illuminated underline */}
-        <svg
-          viewBox="0 0 400 20"
-          preserveAspectRatio="none"
-          style={{
-            position: "absolute",
-            left: "40%",
-            bottom: -14,
-            width: "48%",
-            height: 14,
-            filter: "drop-shadow(0 0 3px rgba(0,200,255,0.9)) drop-shadow(0 0 8px rgba(0,143,255,0.7))",
-          }}
-        >
+        <svg viewBox="0 0 400 20" preserveAspectRatio="none" className="hero-swoosh" aria-hidden="true">
           <defs>
             <linearGradient id="hero-swoosh" x1="0" x2="1" y1="0" y2="0">
               <stop offset="0" stopColor="#008fff" stopOpacity="0" />
@@ -897,7 +875,6 @@ const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
         </svg>
       </div>
 
-      {/* services pill */}
       <div className="hero-services">
         {SERVICES.map((sv) => (
           <div key={sv.label} className="hero-services-item">
@@ -907,7 +884,6 @@ const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
         ))}
       </div>
 
-      {/* buttons */}
       <div
         ref={(el) => {
           els.ctaRow = el
@@ -917,13 +893,13 @@ const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
       >
         <a href="#contact" className="hero-btn hero-btn-primary">
           Get a Quote
-          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke}>
+          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke} aria-hidden="true">
             <line x1="5" y1="12" x2="19" y2="12" />
             <polyline points="12 5 19 12 12 19" />
           </svg>
         </a>
         <a href="#work" className="hero-btn hero-btn-secondary">
-          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke}>
+          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke} aria-hidden="true">
             <polygon points="6 4 20 12 6 20 6 4" />
           </svg>
           See Our Work
@@ -937,13 +913,14 @@ export default function Hero({
   images = DEFAULT_HERO_IMAGES,
   centerImage = DEFAULT_CENTER_IMAGE,
   centerVideo = DEFAULT_CENTER_VIDEO,
+  videoOnLowEnd = false, // set true to also play the center video on low-end devices (not recommended)
 }: {
   images?: string[]
   centerImage?: string
   centerVideo?: string
+  videoOnLowEnd?: boolean
 }) {
   const ref = useRef<HTMLElement>(null)
-  const progress = useRef(0)
   const controlsRef = useRef<any>(null)
   const virtual = useRef(0) // wheel/touch driven "scroll" position, 0..TOTAL_SCROLL
   const expanded = useRef(false) // true once fully zoomed -> page scrolls normally
@@ -953,19 +930,34 @@ export default function Hero({
   const [els] = useState(createEls)
 
   // React state only for things that change rarely (never per scroll tick)
+  const [env, setEnv] = useState<Env | null>(null) // null until the device has been measured
   const [visible, setVisible] = useState(true)
   const [covered, setCovered] = useState(false) // true when the full-screen video hides the 3D scene
-  const [reduced, setReduced] = useState(false)
-  const [count, setCount] = useState(0)
+  const [videoOn, setVideoOn] = useState(false)
+
+  useEffect(() => {
+    setEnv(detectEnv())
+  }, [])
+
+  const downgrade = useCallback(() => setEnv((e) => (e && e.tier !== "low" ? { ...e, tier: "low" } : e)), [])
+
+  // video: never on low-end; on capable devices it starts only after the page is idle
+  const allowVideo = !!centerVideo && !!env && (env.tier !== "low" || videoOnLowEnd)
+  useEffect(() => {
+    if (!allowVideo) {
+      setVideoOn(false)
+      return
+    }
+    const w = window as any
+    const id = w.requestIdleCallback ? w.requestIdleCallback(() => setVideoOn(true), { timeout: 1500 }) : window.setTimeout(() => setVideoOn(true), 600)
+    return () => (w.cancelIdleCallback ? w.cancelIdleCallback(id) : clearTimeout(id))
+  }, [allowVideo])
 
   useEffect(() => {
     const section = ref.current
     if (!section) return
 
-    setReduced(window.matchMedia("(prefers-reduced-motion: reduce)").matches)
-    setCount(window.matchMedia("(max-width: 768px)").matches ? 500 : 1500)
-
-    const layout = { scale: 1, vw: 1920, vh: 1080, heroH: 1080 }
+    const layout = { scale: 1, vw: 1920, heroH: 1080 }
     const last = { shift: NaN, v: NaN, zoom: NaN, open: NaN, fade: NaN, covered: false }
     let layoutDirty = true
     let measureDirty = true
@@ -974,42 +966,41 @@ export default function Hero({
 
     // ---- reads (only on resize, once per frame) ----
     const measure = () => {
-      layout.scale = Math.min(1, window.innerWidth / 700)
-      layout.vw = window.innerWidth
-      layout.vh = window.innerHeight
+      layout.vw = section.clientWidth || window.innerWidth
       layout.heroH = section.clientHeight || window.innerHeight
+      layout.scale = designScale(layout.vw, layout.heroH)
+      section.style.setProperty("--s", String(layout.scale)) // drives the text block position in CSS
       layoutDirty = true
-      if (els.content) {
-        els.content.style.top = `calc(${(0.5 - STAGE_SHIFT) * 100}% + ${(CENTER_SIZE / 2) * layout.scale}px)`
-      }
+    }
+
+    const setVis = (el: HTMLElement | null, on: boolean) => {
+      if (el) el.style.visibility = on ? "visible" : "hidden"
     }
 
     // ---- writes (styles only, no layout reads) ----
     const apply = () => {
-      const { scale, vw, vh, heroH } = layout
+      const { scale, vw, heroH } = layout
       const v = virtual.current
       const shift = stage.current
 
       if (shift !== last.shift || layoutDirty) {
         last.shift = shift
-        if (els.centerRoot) els.centerRoot.style.transform = `translateY(${-shift * vh}px)`
+        if (els.centerRoot) els.centerRoot.style.transform = `translateY(${-shift * heroH}px)`
         if (els.content) els.content.style.transform = `translate3d(0, ${(STAGE_SHIFT - shift) * heroH}px, 0)`
       }
 
       if (v !== last.v || layoutDirty) {
         last.v = v
         const open = Math.min(v / SCROLL_DISTANCE, 1)
-        // 0 -> 1 during the zoom phase (after the circle has fully opened and the hold phase is over)
         const zoom = Math.min(Math.max((v - SCROLL_DISTANCE - HOLD_DISTANCE) / ZOOM_DISTANCE, 0), 1)
-        // rings, small images and text fade out as the zoom starts
         const fade = 1 - Math.min(zoom * 3, 1)
 
         if (zoom !== last.zoom || layoutDirty) {
           last.zoom = zoom
-          // the circle morphs into a full-screen landscape rectangle (size + corner radius, no scaling)
+          // the circle morphs into a full-screen rectangle (size + corner radius, no scaling)
           const ease = zoom * zoom * (3 - 2 * zoom)
           const curW = CENTER_SIZE + (vw / scale + 4 - CENTER_SIZE) * ease
-          const curH = CENTER_SIZE + (vh / scale + 4 - CENTER_SIZE) * ease
+          const curH = CENTER_SIZE + (heroH / scale + 4 - CENTER_SIZE) * ease
           const radius = (Math.min(curW, curH) / 2) * (1 - ease)
           if (els.scaleWrap) els.scaleWrap.style.transform = `scale(${scale}) rotateX(${TILT * (1 - zoom)}deg)`
           const em = els.emblem
@@ -1022,7 +1013,12 @@ export default function Hero({
         }
 
         if (fade !== last.fade) {
+          // once faded out, hide the glow / cards / text completely so the browser stops painting them during the zoom
+          const on = fade > 0
           if (els.emblemGlow) els.emblemGlow.style.opacity = String(fade)
+          setVis(els.emblemGlow, on)
+          setVis(els.textBox, on)
+          for (let i = 0; i < els.cards.length; i++) setVis(els.cards[i], on)
         }
         if (els.ring600) els.ring600.style.opacity = v > SCROLL_DISTANCE * 0.6 ? String(fade) : "0"
         if (els.ring500) els.ring500.style.opacity = v > SCROLL_DISTANCE * 0.2 ? String(fade) : "0"
@@ -1043,7 +1039,10 @@ export default function Hero({
 
         // headline / pill / buttons: visible while the circle is closed, gone as soon as it starts opening
         const heroFade = 1 - Math.min(v / (SCROLL_DISTANCE * 0.4), 1)
-        if (els.content) els.content.style.opacity = String(heroFade)
+        if (els.content) {
+          els.content.style.opacity = String(heroFade)
+          els.content.style.visibility = heroFade > 0 ? "visible" : "hidden"
+        }
         if (els.ctaRow) els.ctaRow.style.pointerEvents = heroFade > 0.1 ? "auto" : "none"
 
         // once the video covers the screen the 3D scene is invisible -> stop rendering it
@@ -1063,7 +1062,7 @@ export default function Hero({
         measure()
       }
 
-      // smooth the stage shift (frame-rate independent version of the old 0.12-per-frame ease)
+      // smooth the stage shift (frame-rate independent ease)
       const dt = lastT ? Math.min(t - lastT, 50) : 16.7
       lastT = t
       const open = Math.min(virtual.current / SCROLL_DISTANCE, 1)
@@ -1090,18 +1089,17 @@ export default function Hero({
     const update = (v: number) => {
       virtual.current = Math.min(Math.max(v, 0), TOTAL_SCROLL)
       if (virtual.current >= TOTAL_SCROLL) setExpanded(true)
-      progress.current = Math.min(virtual.current / SCROLL_DISTANCE, 1)
       schedule()
     }
 
     const onWheel = (e: WheelEvent) => {
-      if (expanded.current && e.deltaY < 0 && window.scrollY <= 5) {
-        // scrolling back up at the top: play the animation in reverse
-        setExpanded(false)
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY // Firefox reports lines, not pixels
+      if (expanded.current && dy < 0 && window.scrollY <= 5) {
+        setExpanded(false) // scrolling back up at the top: play the animation in reverse
         e.preventDefault()
       } else if (!expanded.current) {
         e.preventDefault()
-        update(virtual.current + e.deltaY)
+        update(virtual.current + dy)
       }
     }
 
@@ -1115,10 +1113,11 @@ export default function Hero({
       const deltaY = touchStartY.current - y
       if (expanded.current && deltaY < -20 && window.scrollY <= 5) {
         setExpanded(false)
+        touchStartY.current = y
         if (e.cancelable) e.preventDefault()
       } else if (!expanded.current) {
         if (e.cancelable) e.preventDefault()
-        update(virtual.current + deltaY * (deltaY < 0 ? 6 : 4))
+        update(virtual.current + deltaY * (deltaY < 0 ? TOUCH_BACK : TOUCH_FORWARD))
         touchStartY.current = y
       }
     }
@@ -1127,9 +1126,24 @@ export default function Hero({
       touchStartY.current = 0
     }
 
-    // The blocking (non-passive) wheel/touchmove listeners are only attached while they can actually
-    // be needed: during the hero, or when the page is back at the top. Otherwise normal page
-    // scrolling stays on the fast compositor path with no main-thread wait.
+    // keyboard users: space / arrows / page keys drive the hero too (otherwise the scroll lock would trap them)
+    const onKey = (e: KeyboardEvent) => {
+      if (expanded.current) return
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
+      let step = 0
+      if (e.key === "ArrowDown") step = 80
+      else if (e.key === "ArrowUp") step = -80
+      else if (e.key === " " || e.key === "PageDown") step = 300
+      else if (e.key === "PageUp") step = -300
+      else if (e.key === "End") step = TOTAL_SCROLL
+      if (!step) return
+      e.preventDefault()
+      update(virtual.current + step)
+    }
+
+    // blocking (non-passive) listeners are only attached while they can be needed, so normal page
+    // scrolling stays on the fast compositor path
     let blocking = false
     const syncBlocking = () => {
       const need = !expanded.current || window.scrollY <= 5
@@ -1155,12 +1169,24 @@ export default function Hero({
       syncBlocking()
     }
 
-    const onResize = () => {
-      measureDirty = true
-      schedule()
+    // CTA buttons: while the hero is locked a plain #anchor would be reset by onScroll, so finish the hero first, then jump
+    const onCta = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement | null)?.closest?.("a[href^='#']") as HTMLAnchorElement | null
+      if (!a) return
+      const hash = a.getAttribute("href") || ""
+      e.preventDefault()
+      update(TOTAL_SCROLL)
+      setExpanded(true)
+      requestAnimationFrame(() => {
+        try {
+          if (hash.length > 1) document.querySelector(hash)?.scrollIntoView()
+        } catch {
+          /* invalid selector: ignore */
+        }
+      })
     }
 
-    // ---- visibility: pause 3D + video when the hero is off screen / tab hidden ----
+    // ---- visibility: pause video when the hero is off screen / tab hidden ----
     const syncVideo = () => {
       const vid = els.video
       if (!vid) return
@@ -1175,10 +1201,19 @@ export default function Hero({
     })
     io.observe(section)
 
+    // ResizeObserver also catches mobile address-bar show/hide and rotation
+    const ro = new ResizeObserver(() => {
+      measureDirty = true
+      schedule()
+    })
+    ro.observe(section)
+
+    const cta = els.ctaRow
+    cta?.addEventListener("click", onCta)
     window.addEventListener("touchstart", onTouchStart, { passive: true })
     window.addEventListener("touchend", onTouchEnd, { passive: true })
     window.addEventListener("scroll", onScroll, { passive: true })
-    window.addEventListener("resize", onResize, { passive: true })
+    window.addEventListener("keydown", onKey)
     document.addEventListener("visibilitychange", syncVideo)
     syncBlocking()
 
@@ -1186,93 +1221,83 @@ export default function Hero({
     measureDirty = false
     measure()
     apply()
+    section.setAttribute("data-ready", "1")
 
     return () => {
       if (raf) cancelAnimationFrame(raf)
       io.disconnect()
+      ro.disconnect()
+      cta?.removeEventListener("click", onCta)
       window.removeEventListener("wheel", onWheel)
       window.removeEventListener("touchstart", onTouchStart)
       window.removeEventListener("touchmove", onTouchMove)
       window.removeEventListener("touchend", onTouchEnd)
       window.removeEventListener("scroll", onScroll)
-      window.removeEventListener("resize", onResize)
+      window.removeEventListener("keydown", onKey)
       document.removeEventListener("visibilitychange", syncVideo)
     }
   }, [els])
 
+  const low = env?.tier === "low"
+  const count = env ? PARTICLES[env.tier] : 0
+
   return (
-    <section
-      ref={ref}
-      className="hero-root"
-      style={{
-        position: "relative",
-        width: "100%",
-        height: "100vh",
-        overflow: "hidden",
-        background:
-          "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
-      }}
-    >
-      {/* stops global CSS from painting opaque backgrounds over the hero + hero text/button styles */}
+    <section ref={ref} className="hero-root" data-tier={env?.tier ?? "mid"}>
       <style>{HERO_CSS}</style>
 
-      {/* bottom blue glow */}
-      <div
-        style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          height: "33%",
-          pointerEvents: "none",
-          background:
-            "radial-gradient(ellipse 60% 100% at 50% 100%, rgba(30,80,255,0.35) 0%, rgba(30,80,255,0) 70%)",
-        }}
-      />
+      <div className="hero-bottom-glow" />
 
-      <Canvas
-        style={covered ? CANVAS_STYLE_COVERED : CANVAS_STYLE}
-        frameloop={visible && !covered ? "always" : "never"}
-        dpr={CANVAS_DPR}
-        resize={CANVAS_RESIZE}
-        camera={CANVAS_CAMERA}
-        gl={CANVAS_GL}
-        onCreated={onCanvasCreated}
-      >
-        <AdaptiveQuality />
-        <StageOffset shift={stage} />
+      {env && (
+        <Canvas
+          style={covered ? CANVAS_STYLE_COVERED : CANVAS_STYLE}
+          // low tier: always "never" and the FrameLimiter renders at 30fps; others render every frame while visible
+          frameloop={low ? "never" : visible && !covered ? "always" : "never"}
+          dpr={DPR[env.tier]}
+          resize={CANVAS_RESIZE}
+          camera={CANVAS_CAMERA}
+          gl={low ? GL_LOW : GL_FULL}
+          onCreated={onCanvasCreated}
+        >
+          {!low && <AdaptiveQuality onFallback={downgrade} />}
+          <StageOffset shift={stage} />
 
-        {/* lights for the 3D tile edges */}
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[-10, 12, 10]} intensity={2.2} />
-        <pointLight position={[0, 6, 0]} intensity={60} color="#3c6eff" />
+          {/* lights are only needed for the lit tile edges (high/mid) */}
+          {!low && (
+            <>
+              <ambientLight intensity={0.6} />
+              <directionalLight position={[-10, 12, 10]} intensity={2.2} />
+              <pointLight position={[0, 6, 0]} intensity={60} color="#3c6eff" />
+            </>
+          )}
 
-        {count > 0 && (
-          <SafeBoundary name="particles">
+          {count > 0 && (
+            <SafeBoundary name="particles">
+              <Suspense fallback={null}>
+                <HeroParticles count={count} />
+              </Suspense>
+            </SafeBoundary>
+          )}
+
+          <SafeBoundary name="images">
             <Suspense fallback={null}>
-              <HeroParticles count={count} />
+              <HeroImages images={images} tier={env.tier} />
             </Suspense>
           </SafeBoundary>
-        )}
 
-        <SafeBoundary name="images">
-          <Suspense fallback={null}>
-            <HeroImages images={images} />
-          </Suspense>
-        </SafeBoundary>
+          {!env.reduced && <CameraRig controls={controlsRef} />}
+          <OrbitControls
+            ref={controlsRef}
+            enableZoom={false}
+            enablePan={false}
+            enableRotate={!env.coarse} // on touch screens the drag is used to scrub the hero, not to rotate
+            autoRotate={!env.reduced}
+            autoRotateSpeed={0.4}
+          />
+          {low && visible && !covered && <FrameLimiter fps={LOW_FPS} />}
+        </Canvas>
+      )}
 
-        <HeroScrollAnimation progress={progress} />
-        <CameraRig controls={controlsRef} />
-        <OrbitControls
-          ref={controlsRef}
-          enableZoom={false}
-          enablePan={false}
-          autoRotate={!reduced}
-          autoRotateSpeed={0.4}
-        />
-      </Canvas>
-
-      <HeroCenter els={els} centerImage={centerImage} centerVideo={centerVideo} />
+      <HeroCenter els={els} centerImage={centerImage} centerVideo={centerVideo} useVideo={videoOn} />
       <HeroContent els={els} />
     </section>
   )

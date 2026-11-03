@@ -127,7 +127,7 @@ function createGalaxySound() {
       comp.connect(ctx.destination);
 
       // light synthetic reverb tail (short + mono = cheap to build, no hitch on first grab)
-      const len = Math.floor(ctx.sampleRate * 1.1);
+      const len = Math.floor(ctx.sampleRate * 0.8);
       const imp = ctx.createBuffer(1, len, ctx.sampleRate);
       const d = imp.getChannelData(0);
       for (let i = 0; i < len; i++) {
@@ -140,7 +140,7 @@ function createGalaxySound() {
       reverb.connect(wet);
       wet.connect(master);
 
-      noise = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate);
+      noise = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.35), ctx.sampleRate);
       const nd = noise.getChannelData(0);
       for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
     }
@@ -355,8 +355,8 @@ const project = (m: Mat, x: number, y: number, z: number, w: number, h: number):
  *  Computed on demand instead of every frame. */
 const galaxyPoly = (m: Mat, w: number, h: number): Pt[] => {
   const poly: Pt[] = [];
-  for (let i = 0; i < 48; i++) {
-    const a = (i / 48) * Math.PI * 2;
+  for (let i = 0; i < 32; i++) {
+    const a = (i / 32) * Math.PI * 2;
     poly.push(project(m, Math.cos(a) * 0.86, 0, Math.sin(a) * 0.86, w, h));
   }
   return poly;
@@ -442,12 +442,8 @@ void main() {
 `;
 
 /* Every sprite fades smoothly to zero before the edge of its quad, so no hard
-   outlines show. "Cloud" sprites (nebulae, dust) get a turbulent fbm texture,
-   each rotated differently, so overlapping sprites build wispy, irregular gas
-   instead of round blobs.
-   PERF: the fbm is pre-baked ONCE into a small tileable texture (uNoise)
-   instead of being recomputed per pixel (3 octaves x 4 hashes with sin())
-   for every pixel of thousands of overlapping big sprites. */
+   outlines show. "Cloud" sprites (nebulae, dust) sample a pre-baked tileable
+   noise texture (uNoise) instead of computing fbm per pixel. */
 const FRAG = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -491,8 +487,7 @@ const UNIFORMS = [
   "uSizeMul", "uPx", "uMaxPt", "uBoost", "uSpike", "uReveal", "uRadial", "uCloud", "uNoise",
 ] as const;
 
-/** Tileable fbm noise baked into a 256x256 texture (covers 16 base cells,
- *  same 3-octave 0.5/0.25/0.125 recipe as the old per-pixel shader). */
+/** Tileable fbm noise baked into a 256x256 texture (covers 16 base cells). */
 function makeNoiseTexture(gl: WebGLRenderingContext): WebGLTexture | null {
   const N = 256;
   const P = 16;
@@ -656,13 +651,20 @@ class Pts {
   }
 }
 
-/** k = particle density: 1 = full quality, lower = fewer particles (weaker devices).
- *  Returns a list of small build steps. The render loop runs them a few
- *  milliseconds per frame, so generating 150k+ particles never freezes the page.
- *  Steps run in order, so the draw order of `sets` is identical to before. */
-function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() => void)[] {
+/** k = particle density (1 = full, lower = weaker devices).
+ *  ultra = the lightest tier: drops every decorative layer (nebula clouds, dust
+ *  lanes, dwarf galaxies, deep field, bokeh motes, spike stars) and keeps only
+ *  the core look: stars + haze + bulge + core glow.
+ *  Returns small build steps; the render loop runs a few ms of them per frame
+ *  so generating particles never freezes the page. */
+function buildSteps(
+  gl: WebGLRenderingContext,
+  k: number,
+  sets: StarSet[],
+  ultra: boolean
+): (() => void)[] {
   const steps: (() => void)[] = [];
-  const clumps = makeClumps(k < 1 ? 260 : 520);
+  const clumps = makeClumps(k < 1 ? 220 : 520);
   const clump = () => inClump(clumps[(Math.random() * clumps.length) | 0]);
 
   const finish = (pts: Pts, o: Partial<Omit<StarSet, "buf" | "count">>) => {
@@ -698,11 +700,10 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       const rxz = rr * Math.sin(phi);
       const tint = Math.random();
       const col = tint < 0.65 ? [0.8, 0.88, 1] : tint < 0.85 ? [1, 0.9, 0.78] : [0.85, 0.8, 1];
-      // most are faint, very few are bright (like a real magnitude distribution)
       const a = 0.12 + Math.pow(Math.random(), 3) * 0.85;
       p.add(rxz, th, rr * Math.cos(phi), rand(0.01, 0.026) * (rr / 4), col, a);
     }
-    finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.35, radial: 0 });
+    finish(p, { spin: 0, diff: 0, warp: 0, twinkle: ultra ? 0 : 0.35, radial: 0 });
   });
 
   /* 2. faint halo of old stars around the galaxy (gives real depth) */
@@ -722,11 +723,10 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
         rand(0.15, 0.5)
       );
     }
-    finish(p, { spin: 0.2, diff: 0, warp: 0, twinkle: 0.2 });
+    finish(p, { spin: 0.2, diff: 0, warp: 0, twinkle: ultra ? 0 : 0.2 });
   });
 
-  /* 3. glowing gas + unresolved starlight (many very faint, very soft sprites
-        that melt together into a smooth luminous cloud) */
+  /* 3. glowing gas + unresolved starlight */
   steps.push(() => {
     const p = new Pts(Math.floor(10000 * k) + 8);
     const n = Math.floor(6500 * k);
@@ -742,7 +742,6 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       const a = rand(0.01, 0.026) * (1 - r * 0.5) * (0.35 + 0.65 * Math.min(1, r * 3));
       p.add(r, th, gauss() * 0.02, rand(0.08, 0.22) * (0.6 + 0.8 * r), hazeColor(r), a);
     }
-    // soft warm-white glow of countless unresolved stars across the whole disc
     const m = Math.floor(3500 * k);
     for (let i = 0; i < m; i++) {
       const r = clamp(expR(0.3), 0.02, 1);
@@ -751,26 +750,26 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       const col = mix(CREAM, BLUEW, clamp((r - 0.15) / 0.6));
       p.add(r, th, gauss() * 0.02, rand(0.1, 0.2), col, rand(0.006, 0.014) * (1 - r * 0.4));
     }
-    finish(p, { jitter: 0.5 });
+    finish(p, { jitter: ultra ? 0 : 0.5 });
   });
 
-  /* 3b. colourful emission nebulae – big soft glowing clouds inside the arms */
-  steps.push(() => {
-    const n = Math.floor(420 * k);
-    const p = new Pts(n + 8);
-    const pal = [[1, 0.25, 0.5], [0.25, 0.8, 1], [1, 0.5, 0.2], [0.6, 0.3, 1], [1, 0.3, 0.7]];
-    for (let i = 0; i < n; i++) {
-      const [r, th] = clump();
-      const base = pal[(Math.random() * pal.length) | 0];
-      p.add(r, th, gauss() * 0.015, rand(0.14, 0.34) * (0.6 + 0.6 * r), mix(base, hazeColor(r), 0.25), rand(0.02, 0.045));
-    }
-    finish(p, { jitter: 0.4, twinkle: 0.05, twSpeed: 0.3, cloud: 1 });
-  });
+  /* 3b. colourful emission nebulae (skipped on ultra-light devices) */
+  if (!ultra) {
+    steps.push(() => {
+      const n = Math.floor(420 * k);
+      const p = new Pts(n + 8);
+      const pal = [[1, 0.25, 0.5], [0.25, 0.8, 1], [1, 0.5, 0.2], [0.6, 0.3, 1], [1, 0.3, 0.7]];
+      for (let i = 0; i < n; i++) {
+        const [r, th] = clump();
+        const base = pal[(Math.random() * pal.length) | 0];
+        p.add(r, th, gauss() * 0.015, rand(0.14, 0.34) * (0.6 + 0.6 * r), mix(base, hazeColor(r), 0.25), rand(0.02, 0.045));
+      }
+      finish(p, { jitter: 0.4, twinkle: 0.05, twSpeed: 0.3, cloud: 1 });
+    });
+  }
 
-  /* 4. the main disc: well over a hundred thousand tiny individual stars.
-        Mostly very small + faint so they blend into a continuous glow,
-        grouped into clusters so the arms look knotty instead of uniform.
-        Built in 4 chunks so no single frame is blocked for long. */
+  /* 4. the main disc: tiny individual stars, built in 4 chunks so no single
+        frame is blocked for long. */
   {
     const discN = Math.floor(110000 * k);
     const disc = new Pts(discN + 8);
@@ -792,52 +791,56 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
               : Math.random() * Math.PI * 2;
           }
           const thick = 0.012 + 0.03 * Math.exp(-r * 4);
-          const size = Math.random() < 0.012 ? rand(0.007, 0.011) : rand(0.0022, 0.0048);
+          // on weak screens (low DPR) each star is drawn a bit bigger so the
+          // thinner particle count still reads as a full galaxy
+          const sMul = k < 1 ? 1.5 : 1;
+          const size =
+            (Math.random() < 0.012 ? rand(0.007, 0.011) : rand(0.0022, 0.0048)) * sMul;
           const a = rand(0.25, 0.8) * (0.4 + 0.6 * Math.min(1, r * 2.2));
           disc.add(r, th, gauss() * thick, size, starColor(r), a);
         }
-        if (c === CH - 1) finish(disc, { jitter: 0.35, twinkle: 0.12 });
+        if (c === CH - 1) finish(disc, { jitter: ultra ? 0 : 0.35, twinkle: ultra ? 0 : 0.12 });
       });
     }
   }
 
-  /* 5. dark dust lanes along the inner edge of the arms – patchy and
-        filamentary (alpha-blended, they really hide the stars behind) */
-  steps.push(() => {
-    const n = Math.floor(5200 * k);
-    const p = new Pts(n + 208);
-    for (let i = 0; i < n; i++) {
-      let r: number;
-      let th: number;
-      if (Math.random() < 0.45) {
-        [r, th] = clump();
-        th -= 0.1;
-      } else {
-        r = rand(0.12, 0.95);
-        th = armTheta(pickArm(), r) - 0.13 + gauss() * 0.05;
+  /* 5. dark dust lanes (skipped on ultra-light devices) */
+  if (!ultra) {
+    steps.push(() => {
+      const n = Math.floor(5200 * k);
+      const p = new Pts(n + 208);
+      for (let i = 0; i < n; i++) {
+        let r: number;
+        let th: number;
+        if (Math.random() < 0.45) {
+          [r, th] = clump();
+          th -= 0.1;
+        } else {
+          r = rand(0.12, 0.95);
+          th = armTheta(pickArm(), r) - 0.13 + gauss() * 0.05;
+        }
+        p.add(
+          r,
+          th,
+          gauss() * 0.008,
+          rand(0.05, 0.13) * (0.7 + r * 0.7),
+          [0.015, 0.01, 0.03],
+          rand(0.05, 0.11)
+        );
       }
-      p.add(
-        r,
-        th,
-        gauss() * 0.008,
-        rand(0.05, 0.13) * (0.7 + r * 0.7),
-        [0.015, 0.01, 0.03],
-        rand(0.05, 0.11)
-      );
-    }
-    // dusty ring around the core
-    for (let i = 0; i < 200; i++) {
-      p.add(
-        rand(0.1, 0.22),
-        Math.random() * Math.PI * 2,
-        gauss() * 0.01,
-        rand(0.05, 0.1),
-        [0.02, 0.012, 0.03],
-        rand(0.07, 0.14)
-      );
-    }
-    finish(p, { additive: false, cloud: 1 });
-  });
+      for (let i = 0; i < 200; i++) {
+        p.add(
+          rand(0.1, 0.22),
+          Math.random() * Math.PI * 2,
+          gauss() * 0.01,
+          rand(0.05, 0.1),
+          [0.02, 0.012, 0.03],
+          rand(0.07, 0.14)
+        );
+      }
+      finish(p, { additive: false, cloud: 1 });
+    });
+  }
 
   /* 6. pink star-forming knots (HII regions) inside the clusters */
   steps.push(() => {
@@ -850,10 +853,10 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       p.add(r, th, y, rand(0.02, 0.05), col, rand(0.18, 0.4));
       p.add(r, th, y, 0.007, [1, 0.85, 0.95], 0.8);
     }
-    finish(p, { twinkle: 0.15, twSpeed: 0.5 });
+    finish(p, { twinkle: ultra ? 0 : 0.15, twSpeed: 0.5 });
   });
 
-  /* 6b. young blue giants – bright jewels that glow through the bloom */
+  /* 6b. young blue giants – bright jewels */
   steps.push(() => {
     const n = Math.floor(700 * k);
     const p = new Pts(n + 8);
@@ -861,7 +864,7 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       const [r, th] = clump();
       p.add(r, th, gauss() * 0.012, rand(0.009, 0.02), mix([0.7, 0.85, 1], [1, 1, 1], Math.random() * 0.6), rand(0.35, 0.9));
     }
-    finish(p, { twinkle: 0.3, twSpeed: 0.8 });
+    finish(p, { twinkle: ultra ? 0 : 0.3, twSpeed: 0.8 });
   });
 
   /* 7. dense warm bulge + a subtle central bar */
@@ -888,125 +891,127 @@ function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() 
       const z = along * Math.sin(ang) + across * Math.cos(ang);
       p.add(Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.02, rand(0.004, 0.008), mix(WARM, CREAM, 0.5), rand(0.2, 0.5));
     }
-    finish(p, { twinkle: 0.1 });
+    finish(p, { twinkle: ultra ? 0 : 0.1 });
   });
 
-  /* 8. breathing glow of the galactic core */
+  /* 8. glow of the galactic core */
   steps.push(() => {
     const p = new Pts(8);
     p.add(0, 0, 0, 0.6, [0.95, 0.5, 0.8], 0.04);
     p.add(0, 0, 0, 0.34, [1, 0.72, 0.55], 0.1);
     p.add(0, 0, 0, 0.16, [1, 0.88, 0.72], 0.26);
     p.add(0, 0, 0, 0.06, [1, 1, 1], 0.55);
-    finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.1, twSpeed: 0.18 });
+    finish(p, { spin: 0, diff: 0, warp: 0, twinkle: ultra ? 0 : 0.1, twSpeed: 0.18 });
   });
 
-  /* 10. companion dwarf galaxies + globular clusters (fixed in space, so they
-         drift with the camera parallax and give the scene real depth) */
-  steps.push(() => {
-    const p = new Pts(8000);
-    const cart = (x: number, y: number, z: number, size: number, c: number[], a: number) =>
-      p.add(Math.hypot(x, z), Math.atan2(z, x), y, size, c, a);
-    const dwarfs: [number, number, number, number][] = [
-      [1.28, 0.16, -0.5, 1],
-      [-1.2, -0.12, 0.62, 0.7],
-    ];
-    for (const [cx, cy, cz, sc] of dwarfs) {
-      const n = Math.floor(2200 * sc * k);
+  if (!ultra) {
+    /* 10. companion dwarf galaxies + globular clusters */
+    steps.push(() => {
+      const p = new Pts(8000);
+      const cart = (x: number, y: number, z: number, size: number, c: number[], a: number) =>
+        p.add(Math.hypot(x, z), Math.atan2(z, x), y, size, c, a);
+      const dwarfs: [number, number, number, number][] = [
+        [1.28, 0.16, -0.5, 1],
+        [-1.2, -0.12, 0.62, 0.7],
+      ];
+      for (const [cx, cy, cz, sc] of dwarfs) {
+        const n = Math.floor(2200 * sc * k);
+        for (let i = 0; i < n; i++) {
+          cart(
+            cx + gauss() * 0.09 * sc,
+            cy + gauss() * 0.045 * sc,
+            cz + gauss() * 0.07 * sc,
+            rand(0.003, 0.007),
+            mix(BLUEW, CREAM, Math.random()),
+            rand(0.2, 0.7)
+          );
+        }
+        for (let i = 0; i < 30; i++) {
+          cart(
+            cx + gauss() * 0.06 * sc,
+            cy + gauss() * 0.03 * sc,
+            cz + gauss() * 0.05 * sc,
+            rand(0.08, 0.16) * sc,
+            [0.6, 0.75, 1],
+            rand(0.012, 0.025)
+          );
+        }
+      }
+      for (let c = 0; c < 12; c++) {
+        const rr = rand(0.5, 1.4);
+        const a = Math.random() * Math.PI * 2;
+        const cx = Math.cos(a) * rr;
+        const cz = Math.sin(a) * rr;
+        const cy = gauss() * 0.35;
+        for (let i = 0; i < 110; i++) {
+          cart(cx + gauss() * 0.018, cy + gauss() * 0.018, cz + gauss() * 0.018, rand(0.003, 0.006), [1, 0.85, 0.6], rand(0.3, 0.8));
+        }
+        cart(cx, cy, cz, 0.05, [1, 0.85, 0.65], 0.03);
+      }
+      finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.15, radial: 0 });
+    });
+
+    /* 11. deep field: distant galaxies as tiny elliptical smudges */
+    steps.push(() => {
+      const p = new Pts(256);
+      const n = Math.floor(26 * k);
       for (let i = 0; i < n; i++) {
-        cart(
-          cx + gauss() * 0.09 * sc,
-          cy + gauss() * 0.045 * sc,
-          cz + gauss() * 0.07 * sc,
-          rand(0.003, 0.007),
+        const rr = rand(4, 8);
+        const phi = Math.acos(rand(-1, 1));
+        const th = Math.random() * Math.PI * 2;
+        const x = rr * Math.sin(phi) * Math.cos(th);
+        const y = rr * Math.cos(phi);
+        const z = rr * Math.sin(phi) * Math.sin(th);
+        const ang = Math.random() * Math.PI;
+        const col = Math.random() < 0.5 ? [1, 0.82, 0.6] : [0.7, 0.82, 1];
+        for (let j = -3; j <= 3; j++) {
+          const t = j / 3;
+          const fade = 1 - Math.abs(t) * 0.6;
+          const x2 = x + Math.cos(ang) * t * 0.35;
+          const z2 = z + Math.sin(ang) * t * 0.35;
+          p.add(Math.hypot(x2, z2), Math.atan2(z2, x2), y + t * 0.05, rand(0.1, 0.18) * fade, col, 0.05 * fade);
+        }
+      }
+      finish(p, { spin: 0, diff: 0, warp: 0, radial: 0 });
+    });
+
+    /* 12. drifting space-dust motes near the camera */
+    steps.push(() => {
+      const n = Math.floor(36 * k);
+      const p = new Pts(n + 8);
+      for (let i = 0; i < n; i++) {
+        p.add(
+          rand(0.25, 1.5),
+          Math.random() * Math.PI * 2,
+          rand(-0.6, 0.6),
+          rand(0.035, 0.1),
           mix(BLUEW, CREAM, Math.random()),
-          rand(0.2, 0.7)
+          rand(0.02, 0.07)
         );
       }
-      for (let i = 0; i < 30; i++) {
-        cart(
-          cx + gauss() * 0.06 * sc,
-          cy + gauss() * 0.03 * sc,
-          cz + gauss() * 0.05 * sc,
-          rand(0.08, 0.16) * sc,
-          [0.6, 0.75, 1],
-          rand(0.012, 0.025)
-        );
-      }
-    }
-    for (let c = 0; c < 12; c++) {
-      const rr = rand(0.5, 1.4);
-      const a = Math.random() * Math.PI * 2;
-      const cx = Math.cos(a) * rr;
-      const cz = Math.sin(a) * rr;
-      const cy = gauss() * 0.35;
-      for (let i = 0; i < 110; i++) {
-        cart(cx + gauss() * 0.018, cy + gauss() * 0.018, cz + gauss() * 0.018, rand(0.003, 0.006), [1, 0.85, 0.6], rand(0.3, 0.8));
-      }
-      cart(cx, cy, cz, 0.05, [1, 0.85, 0.65], 0.03);
-    }
-    finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.15, radial: 0 });
-  });
+      finish(p, { spin: 0.12, diff: 0, warp: 0, jitter: 1.5, twinkle: 0.25, twSpeed: 0.4, radial: 0 });
+    });
 
-  /* 11. deep field: distant galaxies as tiny elliptical smudges far behind */
-  steps.push(() => {
-    const p = new Pts(256);
-    const n = Math.floor(26 * k);
-    for (let i = 0; i < n; i++) {
-      const rr = rand(4, 8);
-      const phi = Math.acos(rand(-1, 1));
-      const th = Math.random() * Math.PI * 2;
-      const x = rr * Math.sin(phi) * Math.cos(th);
-      const y = rr * Math.cos(phi);
-      const z = rr * Math.sin(phi) * Math.sin(th);
-      const ang = Math.random() * Math.PI;
-      const col = Math.random() < 0.5 ? [1, 0.82, 0.6] : [0.7, 0.82, 1];
-      for (let j = -3; j <= 3; j++) {
-        const t = j / 3;
-        const fade = 1 - Math.abs(t) * 0.6;
-        const x2 = x + Math.cos(ang) * t * 0.35;
-        const z2 = z + Math.sin(ang) * t * 0.35;
-        p.add(Math.hypot(x2, z2), Math.atan2(z2, x2), y + t * 0.05, rand(0.1, 0.18) * fade, col, 0.05 * fade);
+    /* 9. bright foreground stars with soft diffraction spikes */
+    steps.push(() => {
+      const n = Math.floor(40 * k);
+      const p = new Pts(n + 8);
+      for (let i = 0; i < n; i++) {
+        const r = rand(0.08, 1.2);
+        const th = Math.random() * Math.PI * 2;
+        const col = Math.random() < 0.6 ? [0.8, 0.9, 1] : [1, 0.9, 0.78];
+        p.add(r, th, gauss() * 0.12, rand(0.03, 0.055), col, rand(0.3, 0.65));
       }
-    }
-    finish(p, { spin: 0, diff: 0, warp: 0, radial: 0 });
-  });
-
-  /* 12. drifting space-dust motes near the camera: soft bokeh for depth */
-  steps.push(() => {
-    const n = Math.floor(36 * k);
-    const p = new Pts(n + 8);
-    for (let i = 0; i < n; i++) {
-      p.add(
-        rand(0.25, 1.5),
-        Math.random() * Math.PI * 2,
-        rand(-0.6, 0.6),
-        rand(0.035, 0.1),
-        mix(BLUEW, CREAM, Math.random()),
-        rand(0.02, 0.07)
-      );
-    }
-    finish(p, { spin: 0.12, diff: 0, warp: 0, jitter: 1.5, twinkle: 0.25, twSpeed: 0.4, radial: 0 });
-  });
-
-  /* 9. a handful of bright foreground stars with soft diffraction spikes */
-  steps.push(() => {
-    const n = Math.floor(40 * k);
-    const p = new Pts(n + 8);
-    for (let i = 0; i < n; i++) {
-      const r = rand(0.08, 1.2);
-      const th = Math.random() * Math.PI * 2;
-      const col = Math.random() < 0.6 ? [0.8, 0.9, 1] : [1, 0.9, 0.78];
-      p.add(r, th, gauss() * 0.12, rand(0.03, 0.055), col, rand(0.3, 0.65));
-    }
-    finish(p, { spin: 0.3, diff: 0, warp: 0.5, twinkle: 0.35, spike: 1, radial: 0 });
-  });
+      finish(p, { spin: 0.3, diff: 0, warp: 0.5, twinkle: 0.35, spike: 1, radial: 0 });
+    });
+  }
 
   return steps;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Cinematic post-processing: bloom, filmic tone-mapping, vignette    */
+/*  (skipped entirely on the ultra-light tier)                         */
 /* ------------------------------------------------------------------ */
 const QUAD_VERT = `
 attribute vec2 aPos;
@@ -1191,32 +1196,46 @@ function Galaxy({
     const ring = ringRef.current;
     if (!canvas || !ring) return;
 
+    /* ---- device tier: scale quality to the hardware (decided BEFORE the
+            GL context is created so we can pick the right power profile) ---- */
+    const nav = navigator as Navigator & {
+      deviceMemory?: number;
+      connection?: { saveData?: boolean };
+    };
+    const lite = window.innerWidth < 700;
+    const cores = nav.hardwareConcurrency || 4;
+    const mem = nav.deviceMemory || 4;
+    const saveData = !!nav.connection?.saveData;
+    // ultra: the lightest tier (cheap phones, data-saver mode) – no bloom, no
+    // decorative layers, very low particle count and resolution
+    const ultra = saveData || mem <= 2 || (lite && (cores <= 4 || mem <= 3));
+    // weak: every phone + any low-core / low-RAM machine
+    const weak = ultra || lite || cores <= 4 || mem <= 4;
+    const density = ultra ? 0.1 : weak ? 0.2 : 1;
+    const baseDpr = ultra ? 0.6 : weak ? 0.75 : Math.min(window.devicePixelRatio || 1, 1.75);
+    let q = 1; // dynamic resolution multiplier – only ever goes down
+
     const gl = canvas.getContext("webgl", {
       alpha: true,
       antialias: false,
+      depth: false,
+      stencil: false,
       premultipliedAlpha: true,
-      powerPreference: "high-performance",
+      powerPreference: weak ? "default" : "high-performance",
+      // refuse software rendering: a CSS background is far better than a slideshow
+      failIfMajorPerformanceCaveat: true,
     }) as WebGLRenderingContext | null;
     const rctx = ring.getContext("2d");
     if (!gl || !rctx) return;
-
-    /* ---- device tier: scale quality to the hardware ---- */
-    const lite = window.innerWidth < 700;
-    const cores = navigator.hardwareConcurrency || 4;
-    const mem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory || 4;
-    const weak = cores <= 4 || (lite && mem <= 4);
-    const density = weak ? 0.25 : lite ? 0.5 : 1;
-    const baseDpr = weak ? 0.75 : Math.min(window.devicePixelRatio || 1, lite ? 1.25 : 1.75);
-    let q = 1; // dynamic resolution multiplier – only ever goes down
 
     /* ---- programs ---- */
     const starProg = makeProgram(gl, VERT, FRAG, [
       "aR", "aTheta", "aY", "aSize", "aColor", "aAlpha", "aSeed",
     ]);
     if (!starProg) return;
-    const brightProg = makeProgram(gl, QUAD_VERT, BRIGHT_FRAG, ["aPos"]);
-    const blurProg = makeProgram(gl, QUAD_VERT, BLUR_FRAG, ["aPos"]);
-    const compProg = makeProgram(gl, QUAD_VERT, COMP_FRAG, ["aPos"]);
+    const brightProg = ultra ? null : makeProgram(gl, QUAD_VERT, BRIGHT_FRAG, ["aPos"]);
+    const blurProg = ultra ? null : makeProgram(gl, QUAD_VERT, BLUR_FRAG, ["aPos"]);
+    const compProg = ultra ? null : makeProgram(gl, QUAD_VERT, COMP_FRAG, ["aPos"]);
     const hasPost = !!(brightProg && blurProg && compProg);
 
     const uloc = (p: WebGLProgram, names: string[]) => {
@@ -1229,7 +1248,7 @@ function Galaxy({
     const U = {} as Record<(typeof UNIFORMS)[number], WebGLUniformLocation | null>;
     UNIFORMS.forEach((n) => (U[n] = gl.getUniformLocation(starProg, n)));
     const maxPt = (gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array)[1] || 64;
-    gl.uniform1f(U.uMaxPt, weak ? Math.min(maxPt, 48) : maxPt);
+    gl.uniform1f(U.uMaxPt, weak ? Math.min(maxPt, 40) : maxPt);
     gl.uniform1i(U.uNoise, 4); // baked cloud noise lives on texture unit 4
 
     const BU = brightProg ? uloc(brightProg, ["uTex", "uTexel", "uThresh", "uKnee"]) : {};
@@ -1255,11 +1274,14 @@ function Galaxy({
     /* ---- particles are generated in small slices across frames ---- */
     const sets: StarSet[] = [];
     const noise: { tex: WebGLTexture | null } = { tex: null };
-    const steps: (() => void)[] = [
-      () => {
-        noise.tex = makeNoiseTexture(gl);
-      },
-    ].concat(buildSteps(gl, density, sets));
+    const first: (() => void)[] = ultra
+      ? []
+      : [
+          () => {
+            noise.tex = makeNoiseTexture(gl);
+          },
+        ];
+    const steps: (() => void)[] = first.concat(buildSteps(gl, density, sets, ultra));
     let stepIdx = 0;
     let building = true;
 
@@ -1274,8 +1296,6 @@ function Galaxy({
     let usePost = false;
     let hdr = false;
 
-    // half-float targets keep the real brightness of the core and bright stars,
-    // so the glow falls off like real light. Falls back to 8-bit when unsupported.
     const extHF = gl.getExtension("OES_texture_half_float");
     const extHFL = gl.getExtension("OES_texture_half_float_linear");
     const extCB = gl.getExtension("EXT_color_buffer_half_float");
@@ -1286,6 +1306,11 @@ function Galaxy({
 
     const buildTargets = () => {
       freeTargets();
+      scene = halfA = halfB = quarterA = quarterB = streakA = streakB = null;
+      if (!hasPost) {
+        usePost = false; // ultra tier: render straight to the screen, zero extra memory
+        return;
+      }
       const W = canvas.width;
       const H = canvas.height;
       const make = (type: number) => {
@@ -1294,9 +1319,13 @@ function Galaxy({
         halfB = createTarget(gl, Math.max(1, W >> 1), Math.max(1, H >> 1), type);
         quarterA = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
         quarterB = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
-        streakA = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
-        streakB = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
-        return !!(scene && halfA && halfB && quarterA && quarterB && streakA && streakB);
+        // light-streak buffers are only used on strong devices
+        if (!weak) {
+          streakA = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
+          streakB = createTarget(gl, Math.max(1, W >> 2), Math.max(1, H >> 2), type);
+          return !!(scene && halfA && halfB && quarterA && quarterB && streakA && streakB);
+        }
+        return !!(scene && halfA && halfB && quarterA && quarterB);
       };
       hdr = false;
       let ok = false;
@@ -1306,7 +1335,7 @@ function Galaxy({
         if (!ok) freeTargets();
       }
       if (!ok) ok = make(gl.UNSIGNED_BYTE);
-      usePost = hasPost && ok;
+      usePost = ok;
     };
 
     /* ---- sizing ---- */
@@ -1330,34 +1359,52 @@ function Galaxy({
       buildTargets();
     };
     resize();
-    window.addEventListener("resize", resize);
+    // debounced: rotating a phone / resizing a window must not rebuild GPU buffers 60x per second
+    let resizeTimer = 0;
+    const onResize = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(resize, 150);
+    };
+    window.addEventListener("resize", onResize);
 
-    /* ---- mouse parallax ---- */
+    /* ---- mouse parallax (mouse only – touch drags must not shake the camera) ---- */
     let mxT = 0;
     let myT = 0;
     let mx = 0;
     let my = 0;
     const onMouse = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse") return;
       mxT = (e.clientX / window.innerWidth - 0.5) * 2;
       myT = (e.clientY / window.innerHeight - 0.5) * 2;
     };
-    window.addEventListener("pointermove", onMouse, { passive: true });
+    if (!weak) window.addEventListener("pointermove", onMouse, { passive: true });
 
     /* ---- visibility + cinematic intro (starts when the section scrolls in) ---- */
     const reduced = !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const INTRO = reduced ? 0.01 : 5.5;
+    const INTRO = reduced ? 0.01 : ultra ? 2.5 : 5.5;
     let visible = typeof IntersectionObserver === "undefined";
     let introStart = visible ? performance.now() : -1;
     let raf = 0;
     let last = performance.now();
+    let lost = false;
 
     /** the loop fully stops while the section is off-screen and restarts here */
     const start = () => {
-      if (!raf) {
+      if (!raf && !lost) {
         last = performance.now();
         raf = requestAnimationFrame(frame);
       }
     };
+
+    // GPU context lost (common on low-memory phones): stop cleanly, the CSS
+    // gradient behind the canvas keeps the section looking fine
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      lost = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    };
+    canvas.addEventListener("webglcontextlost", onLost);
 
     const io =
       typeof IntersectionObserver !== "undefined"
@@ -1441,9 +1488,10 @@ function Galaxy({
 
     const frame = (now: number) => {
       raf = 0;
+      if (lost) return;
 
       // generate the galaxy a few ms per frame (even while off-screen)
-      if (building) pump(6);
+      if (building) pump(weak ? 4 : 6);
 
       if (!visible) {
         last = now;
@@ -1459,7 +1507,7 @@ function Galaxy({
       // 20 slow frames in a row -> render fewer pixels (auto-adaptive resolution)
       if (ms < 120) {
         slow = ms > (weak ? 45 : 26) ? slow + 1 : 0;
-        if (slow >= 20 && q > 0.5) {
+        if (slow >= (weak ? 12 : 20) && q > 0.5) {
           q = Math.max(0.5, q - 0.15);
           slow = 0;
           resize();
@@ -1527,7 +1575,8 @@ function Galaxy({
       const qB = quarterB as Target | null;
       const sA = streakA as Target | null;
       const sB = streakB as Target | null;
-      if (usePost && sc && hA && hB && qA && qB && sA && sB && brightProg && blurProg && compProg) {
+      const streakOn = !weak && !!(sA && sB);
+      if (usePost && sc && hA && hB && qA && qB && brightProg && blurProg && compProg) {
         gl.disable(gl.BLEND);
         setAttribs(1);
 
@@ -1563,7 +1612,7 @@ function Galaxy({
           blur(qB, qA, 0, 2.6 / qA.h);
         }
         // anamorphic streak: only the very brightest points, smeared sideways
-        if (!weak) {
+        if (streakOn && sA && sB) {
           bright(sc, sA, hdr ? 2.2 : 0.85, hdr ? 2.0 : 0.15);
           blur(sA, sB, 3 / sA.w, 0);
           blur(sB, sA, 7 / sA.w, 0);
@@ -1576,13 +1625,13 @@ function Galaxy({
         bindTex(0, sc.tex);
         bindTex(1, hA.tex);
         bindTex(2, qA.tex);
-        bindTex(3, sB.tex);
+        bindTex(3, (streakOn && sB ? sB : qA).tex);
         gl.uniform1i(CU.uScene, 0);
         gl.uniform1i(CU.uBloom1, 1);
         gl.uniform1i(CU.uBloom2, 2);
         gl.uniform1i(CU.uStreak, 3);
         gl.uniform1f(CU.uBloomAmt, (hdr ? 0.55 : 0.85) + boost * 0.7);
-        gl.uniform1f(CU.uStreakAmt, weak ? 0 : (hdr ? 0.5 : 0.35) + boost * 0.5);
+        gl.uniform1f(CU.uStreakAmt, streakOn ? (hdr ? 0.5 : 0.35) + boost * 0.5 : 0);
         gl.uniform1f(CU.uExpo, hdr ? 1.0 : 1.12);
         gl.uniform1f(CU.uTime, t);
         gl.uniform1f(CU.uFade, 1);
@@ -1688,8 +1737,11 @@ function Galaxy({
     return () => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
+      lost = true;
+      window.clearTimeout(resizeTimer);
       io?.disconnect();
-      window.removeEventListener("resize", resize);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onMouse);
       sets.forEach((s) => gl.deleteBuffer(s.buf));
       if (noise.tex) gl.deleteTexture(noise.tex);
@@ -1699,6 +1751,8 @@ function Galaxy({
       if (brightProg) gl.deleteProgram(brightProg);
       if (blurProg) gl.deleteProgram(blurProg);
       if (compProg) gl.deleteProgram(compProg);
+      // hand the GPU memory back immediately (matters on low-RAM phones)
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, [progressRef, hotRef, flashRef, hitRef]);
 
@@ -1712,8 +1766,8 @@ function Galaxy({
 
   return (
     <>
-      <canvas ref={glRef} style={{ ...fill, zIndex: 1 }} />
-      <canvas ref={ringRef} style={{ ...fill, zIndex: 2 }} />
+      <canvas ref={glRef} aria-hidden="true" style={{ ...fill, zIndex: 1 }} />
+      <canvas ref={ringRef} aria-hidden="true" style={{ ...fill, zIndex: 2 }} />
     </>
   );
 }
@@ -1727,12 +1781,34 @@ const GalaxyLayer = memo(Galaxy);
 /*  PERF: card positions, scroll progress and drag offsets live in     */
 /*  refs and are written straight to the DOM (transform / opacity).    */
 /*  React state is only used for things that really change the markup  */
-/*  (hint text, mute icon, mobile layout), so scrolling and dragging   */
-/*  no longer re-render the whole component every frame.               */
+/*  (hint text, mute icon, compact layout), so scrolling and dragging  */
+/*  never re-render the whole component every frame.                   */
 /* ------------------------------------------------------------------ */
 const SHADOW_IDLE = "0 0 22px rgba(37,99,235,0.55), inset 0 0 12px rgba(37,99,235,0.2)";
 const SHADOW_DRAG = "0 0 38px rgba(59,130,246,0.95), inset 0 0 18px rgba(59,130,246,0.35)";
+// phones: smaller blur radius, no inset layer = far cheaper to paint
+const SHADOW_IDLE_LITE = "0 0 10px rgba(37,99,235,0.5)";
+const SHADOW_DRAG_LITE = "0 0 18px rgba(59,130,246,0.9)";
 const CARD_TRANSITION = "transform 0.45s cubic-bezier(.2,.8,.2,1), opacity 0.45s";
+
+/* Real viewport units: `svh` stays constant while the mobile URL bar shows /
+   hides, so the stage never resizes mid-scroll (which would rebuild the GPU
+   buffers and cause jank). `vh` is the fallback for older browsers. */
+const CSS = `
+.st-sec{position:relative;height:320vh;height:320svh;background:#000;overflow-x:clip}
+.st-stage{position:sticky;top:0;width:100%;height:100vh;height:100svh;overflow:hidden;contain:layout paint;
+  -webkit-tap-highlight-color:transparent;
+  background:radial-gradient(ellipse 60% 45% at 25% 22%,rgba(88,40,160,.2),transparent 70%),
+  radial-gradient(ellipse 55% 40% at 78% 74%,rgba(20,70,200,.2),transparent 70%),
+  radial-gradient(ellipse at center,#050b24 0%,#02040f 55%,#000 100%)}
+.st-card{position:absolute;left:50%;top:50%;opacity:0;pointer-events:none;cursor:grab;touch-action:none;
+  user-select:none;-webkit-user-select:none;border-radius:18px;background:rgba(4,10,32,.82);
+  border:1px solid rgba(59,130,246,.75);color:#e6efff;will-change:transform,opacity;box-sizing:border-box}
+.st-btn{position:absolute;z-index:60;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;
+  cursor:pointer;color:#93b4ff;background:rgba(4,10,32,.85);border:1px solid rgba(59,130,246,.6);padding:0}
+.st-btn:focus-visible{outline:2px solid #93b4ff;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.st-card{transition:none!important}}
+`;
 
 type DragState = { id: number; sx: number; sy: number; ox: number; oy: number; cx: number; cy: number };
 
@@ -1742,6 +1818,7 @@ export default function Testimonials() {
   const headingRef = useRef<HTMLDivElement>(null);
   const cardEls = useRef<(HTMLDivElement | null)[]>([]);
   const lastTransform = useRef<string[]>([]);
+  const lastMeta = useRef<string[]>([]);
 
   const progressRef = useRef(0);
   const hotRef = useRef(false);
@@ -1749,7 +1826,9 @@ export default function Testimonials() {
   const hitRef = useRef<HitInfo>({ mvp: null, w: 0, h: 0 });
 
   const sizeRef = useRef({ w: 1200, h: 800 });
+  const stageHRef = useRef(0);
   const mobileRef = useRef(false);
+  const compactRef = useRef(false);
   const offsetsRef = useRef<Record<number, { x: number; y: number }>>({});
   const dismissedRef = useRef<Set<number>>(new Set());
   const draggingRef = useRef<number | null>(null);
@@ -1757,7 +1836,7 @@ export default function Testimonials() {
   const dragRaf = useRef(0);
 
   const [near, setNear] = useState(false);
-  const [mobile, setMobile] = useState(false);
+  const [compact, setCompact] = useState(false); // phones + short landscape screens
   const [early, setEarly] = useState(true); // p < 0.08 -> "scroll down" hint
   const [dismissedCount, setDismissedCount] = useState(0);
   const [hot, setHot] = useState(false);
@@ -1765,7 +1844,7 @@ export default function Testimonials() {
 
   const [sound] = useState(createGalaxySound);
 
-  const cardW = mobile ? 220 : 290;
+  const cardW = compact ? 220 : 290;
 
   /* ---- geometry helpers (all ref based, so they never go stale) ---- */
   const basePos = useCallback((r: Review) => {
@@ -1789,7 +1868,9 @@ export default function Testimonials() {
     return Math.hypot(cx - w / 2, cy - h / 2) < Math.min(w, h) * 0.34 * 0.9;
   }, []);
 
-  /** write one card's position / look straight to the DOM */
+  /** write one card's position / look straight to the DOM.
+   *  Only transform + opacity change while scrolling; the other style
+   *  properties are written only when their value actually changes. */
   const applyCard = useCallback(
     (r: Review) => {
       const el = cardEls.current[r.id];
@@ -1804,18 +1885,25 @@ export default function Testimonials() {
       const scale = isDismissed ? 0 : 0.15 + 0.85 * b.e;
       const rot = (1 - b.e) * (r.id % 2 ? -540 : 540) + r.tilt * b.e;
 
-      const tf = `translate3d(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px), 0) scale(${(isDragging ? scale * 1.05 : scale).toFixed(4)}) rotate(${rot.toFixed(2)}deg)`;
+      const tf = `translate3d(calc(-50% + ${x.toFixed(1)}px), calc(-50% + ${y.toFixed(1)}px), 0) scale(${(isDragging ? scale * 1.05 : scale).toFixed(3)}) rotate(${rot.toFixed(1)}deg)`;
       if (lastTransform.current[r.id] !== tf) {
         lastTransform.current[r.id] = tf;
         el.style.transform = tf;
-        el.style.opacity = (isDismissed ? 0 : b.e).toFixed(3);
+        el.style.opacity = (isDismissed ? 0 : b.e).toFixed(2);
       }
+
       const interactive = !isDismissed && b.e > 0.95;
-      el.style.pointerEvents = interactive ? "auto" : "none";
-      el.style.cursor = isDragging ? "grabbing" : "grab";
-      el.style.zIndex = isDragging ? "50" : "10";
-      el.style.transition = isDragging ? "none" : CARD_TRANSITION;
-      el.style.boxShadow = isDragging ? SHADOW_DRAG : SHADOW_IDLE;
+      const meta = `${interactive ? 1 : 0}${isDragging ? 1 : 0}${compactRef.current ? 1 : 0}`;
+      if (lastMeta.current[r.id] !== meta) {
+        lastMeta.current[r.id] = meta;
+        el.style.pointerEvents = interactive ? "auto" : "none";
+        el.style.cursor = isDragging ? "grabbing" : "grab";
+        el.style.zIndex = isDragging ? "50" : "10";
+        el.style.transition = isDragging ? "none" : CARD_TRANSITION;
+        el.style.boxShadow = compactRef.current
+          ? isDragging ? SHADOW_DRAG_LITE : SHADOW_IDLE_LITE
+          : isDragging ? SHADOW_DRAG : SHADOW_IDLE;
+      }
     },
     [basePos]
   );
@@ -1824,7 +1912,7 @@ export default function Testimonials() {
     REVIEWS.forEach(applyCard);
   }, [applyCard]);
 
-  /* ---- only create the galaxy (WebGL context + 100k particles) when the
+  /* ---- only create the galaxy (WebGL context + particles) when the
           section is about to scroll into view, so page load stays fast ---- */
   useEffect(() => {
     const el = sectionRef.current;
@@ -1839,7 +1927,7 @@ export default function Testimonials() {
           io.disconnect();
         }
       },
-      { rootMargin: "800px 0px" }
+      { rootMargin: "600px 0px" }
     );
     io.observe(el);
     return () => io.disconnect();
@@ -1870,7 +1958,9 @@ export default function Testimonials() {
       const el = sectionRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const total = rect.height - window.innerHeight;
+      // use the real (stable) stage height so progress always reaches exactly 0..1,
+      // even when the mobile URL bar changes window.innerHeight
+      const total = rect.height - (stageHRef.current || window.innerHeight);
       const v = total > 0 ? clamp(-rect.top / total) : 0;
       const prev = progressRef.current;
       progressRef.current = v;
@@ -1886,7 +1976,7 @@ export default function Testimonials() {
         setDismissedCount(0);
       }
 
-      if (headingRef.current) headingRef.current.style.opacity = clamp(0.35 + v * 2).toFixed(3);
+      if (headingRef.current) headingRef.current.style.opacity = clamp(0.35 + v * 2).toFixed(2);
       applyAll();
     };
     const onScroll = () => {
@@ -1910,9 +2000,12 @@ export default function Testimonials() {
       const w = el.clientWidth;
       const h = el.clientHeight;
       sizeRef.current = { w, h };
+      stageHRef.current = h;
       const m = w < 700;
-      mobileRef.current = m;
-      setMobile(m); // no-op unless it flips
+      mobileRef.current = m; // phone card layout
+      const c = m || h < 520; // phones AND short landscape screens get smaller cards
+      compactRef.current = c;
+      setCompact(c); // no-op unless it flips
       applyAll();
     };
     measure();
@@ -1993,25 +2086,9 @@ export default function Testimonials() {
 
   /* ---- render ---- */
   return (
-    <section
-      ref={sectionRef}
-      style={{ position: "relative", height: "320vh", background: "#000" }}
-    >
-      <div
-        ref={stageRef}
-        style={{
-          position: "sticky",
-          top: 0,
-          height: "100vh",
-          width: "100%",
-          overflow: "hidden",
-          background: [
-            "radial-gradient(ellipse 60% 45% at 25% 22%, rgba(88,40,160,0.2), transparent 70%)",
-            "radial-gradient(ellipse 55% 40% at 78% 74%, rgba(20,70,200,0.2), transparent 70%)",
-            "radial-gradient(ellipse at center, #050b24 0%, #02040f 55%, #000 100%)",
-          ].join(","),
-        }}
-      >
+    <section ref={sectionRef} className="st-sec" aria-label="Client testimonials">
+      <style>{CSS}</style>
+      <div ref={stageRef} className="st-stage">
         {near && (
           <GalaxyLayer
             progressRef={progressRef}
@@ -2021,29 +2098,19 @@ export default function Testimonials() {
           />
         )}
 
-        {/* sound on / off */}
+        {/* sound on / off (44px tap target, respects notches) */}
         <button
           type="button"
+          className="st-btn"
           onClick={toggleMute}
           aria-label={muted ? "Turn sound on" : "Turn sound off"}
           aria-pressed={muted}
           style={{
-            position: "absolute",
-            top: 14,
-            right: 14,
-            zIndex: 60,
-            width: 40,
-            height: 40,
-            borderRadius: "50%",
-            display: "grid",
-            placeItems: "center",
-            cursor: "pointer",
-            color: "#93b4ff",
-            background: "rgba(4,10,32,0.85)",
-            border: "1px solid rgba(59,130,246,0.6)",
+            top: "calc(10px + env(safe-area-inset-top, 0px))",
+            right: "calc(10px + env(safe-area-inset-right, 0px))",
           }}
         >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M11 5 6 9H2v6h4l5 4V5z" />
             {muted ? (
               <>
@@ -2064,14 +2131,14 @@ export default function Testimonials() {
           ref={headingRef}
           style={{
             position: "absolute",
-            top: mobile ? "5%" : "7%",
+            top: compact ? "calc(3% + env(safe-area-inset-top, 0px))" : "7%",
             left: 0,
             right: 0,
             textAlign: "center",
             zIndex: 3,
             pointerEvents: "none",
             opacity: 0.35,
-            padding: "0 16px",
+            padding: "0 56px", // keeps the title clear of the mute button on narrow screens
             willChange: "opacity",
           }}
         >
@@ -2088,11 +2155,13 @@ export default function Testimonials() {
           </p>
           <h2
             style={{
-              margin: "8px 0 0",
-              fontSize: mobile ? 28 : 44,
+              margin: "6px 0 0",
+              fontSize: "clamp(22px, 6.2vw, 44px)",
+              lineHeight: 1.15,
               fontWeight: 800,
               color: "#fff",
-              textShadow: "0 0 24px rgba(59,130,246,0.9)",
+              // glow is a big repaint on phones, so it is only used on larger screens
+              textShadow: compact ? "none" : "0 0 24px rgba(59,130,246,0.9)",
             }}
           >
             What Our Clients Say
@@ -2108,60 +2177,61 @@ export default function Testimonials() {
             ref={(el) => {
               cardEls.current[r.id] = el;
             }}
+            className="st-card"
             onPointerDown={(e) => onDown(e, r)}
             onPointerMove={(e) => onMove(e, r)}
             onPointerUp={(e) => onUp(e, r)}
             onPointerCancel={(e) => onUp(e, r)}
             style={{
-              position: "absolute",
-              left: "50%",
-              top: "50%",
-              width: cardW,
+              width: `min(${cardW}px, ${compact ? 66 : 90}vw)`,
               transform: "translate3d(-50%, -50%, 0) scale(0.15)",
-              opacity: 0,
               transition: CARD_TRANSITION,
               zIndex: 10,
-              pointerEvents: "none",
-              cursor: "grab",
-              touchAction: "none",
-              userSelect: "none",
-              padding: mobile ? 14 : 18,
-              borderRadius: 18,
-              // no backdrop-filter: re-blurring the animating galaxy behind every card
-              // every frame is a big cost on low-end GPUs. A denser tint looks the same.
-              background: "rgba(4, 10, 32, 0.82)",
-              border: "1px solid rgba(59,130,246,0.75)",
-              boxShadow: SHADOW_IDLE,
-              color: "#e6efff",
-              willChange: "transform, opacity",
+              padding: compact ? 12 : 18,
+              boxShadow: compact ? SHADOW_IDLE_LITE : SHADOW_IDLE,
             }}
           >
-            <div style={{ color: "#fbbf24", fontSize: 15, letterSpacing: 2, marginBottom: 8 }}>
+            <div style={{ color: "#fbbf24", fontSize: compact ? 13 : 15, letterSpacing: 2, marginBottom: compact ? 6 : 8, lineHeight: 1 }}>
               {"★".repeat(r.rating)}
               <span style={{ color: "#334155" }}>{"★".repeat(5 - r.rating)}</span>
             </div>
-            <p style={{ margin: 0, fontSize: mobile ? 13 : 14.5, lineHeight: 1.55 }}>
+            <p
+              style={{
+                margin: 0,
+                fontSize: compact ? 12.5 : 14.5,
+                lineHeight: 1.5,
+                // phones: cap the quote at 4 lines so six cards always fit on screen
+                ...(compact
+                  ? {
+                      display: "-webkit-box",
+                      WebkitLineClamp: 4,
+                      WebkitBoxOrient: "vertical" as const,
+                      overflow: "hidden",
+                    }
+                  : null),
+              }}
+            >
               “{r.text}”
             </p>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: compact ? 10 : 14 }}>
               <div
                 style={{
-                  width: 38,
-                  height: 38,
+                  flex: "none",
+                  width: compact ? 32 : 38,
+                  height: compact ? 32 : 38,
                   borderRadius: "50%",
                   display: "grid",
                   placeItems: "center",
                   fontWeight: 700,
                   color: "#fff",
                   background: "linear-gradient(135deg,#2563eb,#7c3aed)",
-                  boxShadow: "0 0 12px rgba(59,130,246,0.8)",
                 }}
               >
                 {r.name.charAt(0)}
               </div>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>{r.name}</div>
-                <div style={{ fontSize: 12, color: "#93b4ff" }}>{r.role}</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: compact ? 13 : 14 }}>{r.name}</div>
+                <div style={{ fontSize: compact ? 11 : 12, color: "#93b4ff" }}>{r.role}</div>
               </div>
             </div>
           </div>
@@ -2169,17 +2239,19 @@ export default function Testimonials() {
 
         {/* hints */}
         <div
+          aria-live="polite"
           style={{
             position: "absolute",
-            bottom: 22,
+            bottom: "calc(16px + env(safe-area-inset-bottom, 0px))",
             left: 0,
             right: 0,
             textAlign: "center",
-            fontSize: 13,
+            fontSize: compact ? 12 : 13,
+            lineHeight: 1.4,
             color: "#93b4ff",
             zIndex: 3,
             pointerEvents: "none",
-            padding: "0 16px",
+            padding: "0 20px",
           }}
         >
           {early

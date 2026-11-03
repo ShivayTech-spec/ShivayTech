@@ -11,6 +11,7 @@ import React, {
   startTransition,
   useSyncExternalStore,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   motion,
   animate,
@@ -22,23 +23,28 @@ import {
 } from "motion/react";
 
 /* =====================================================================
-   PERFORMANCE NOTES
-   - Open-only parts (hardcover boards, page stacks, fold, left page, right page)
-     are mounted only when a book is hovered (with a short intent delay) / focused / pressed / opened.
-   - Grain textures (SVG noise) switch on after first paint via [data-fx] (idle callback).
-   - Star canvases render at 1x DPR, twinkle pauses off-screen, low-end devices get a static sky.
+   PERFORMANCE + RESPONSIVE NOTES
+   TWO RENDER PATHS (picked automatically):
+   - "simple" path  -> phones, tablets, touch screens, small windows and weak devices
+       * books are flat covers (no preserve-3d, no perspective, no tilt springs, no hover scale)
+       * details open in a native-size, scrollable sheet (real 15-16px text, 44px tap targets)
+       * static sky: ONE canvas, no twinkle animation, no grain textures, no SVG noise filters
+   - "rich" path    -> desktop with a fine pointer on decent hardware: the full 3D book experience
+
+   SHARED
+   - Open-only parts (hardcover boards, page stacks, fold, left/right page) mount only on hover intent / focus / press / open.
    - content-visibility:auto skips rendering the section until it nears the viewport.
-   - No big drop-shadow filters, no mix-blend layers, no backdrop-blur on the sheet.
-   - ServiceCard + CardSlot are memoized with stable props, so grabbing / opening one book
-     re-renders only that book (z-index is stored per card, not as a reordered list).
+   - ServiceCard + CardSlot are memoized with stable props, so grabbing / opening one book re-renders only that book.
    - Mouse tilt reads layout at most once per animation frame.
    - Resize relayout is debounced; media queries use useSyncExternalStore (no extra first render).
    - will-change is only set while a card is being dragged.
+   - Phone layout is a zig-zag grid computed in px, so every book is visible, reachable and never outside the section.
    ===================================================================== */
 
 // Space background that fills only its parent section (the parent must be position: relative).
-// Stars are drawn ONCE onto 3 small canvases (no animation loop). The twinkle is a CSS opacity
+// Stars are drawn ONCE onto small canvases (no animation loop). The twinkle is a CSS opacity
 // fade on each canvas with a different duration/delay, so it runs on the GPU compositor.
+// In `lite` mode there is a single canvas and no animation at all.
 type Star = { x: number; y: number; r: number; a: number; color: string };
 
 const TWINKLE_LAYERS = 3;
@@ -53,28 +59,25 @@ const TWINKLE_CSS = `
   .sb-layer-1 { animation-duration: 4.5s; animation-delay: -1.5s; }
   .sb-layer-2 { animation-duration: 6s; animation-delay: -3s; }
   .sb-paused .sb-layer { animation-play-state: paused; will-change: auto; }
-  .sb-lite .sb-layer { animation: none; opacity: 0.8; will-change: auto; }
+  .sb-lite .sb-layer { animation: none; opacity: 0.85; will-change: auto; }
   @media (prefers-reduced-motion: reduce) {
     .sb-layer { animation: none; opacity: 0.8; will-change: auto; }
   }
 `;
 
-const SpaceBackdropBase = () => {
+const SpaceBackdropBase = ({ lite }: { lite: boolean }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+  const layers = lite ? 1 : TWINKLE_LAYERS;
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    const canvases = canvasRefs.current.filter(Boolean) as HTMLCanvasElement[];
-    if (!wrap || canvases.length !== TWINKLE_LAYERS) return;
+    const canvases = canvasRefs.current.slice(0, layers).filter(Boolean) as HTMLCanvasElement[];
+    if (!wrap || canvases.length !== layers) return;
 
     // 1x is plenty for 1-3px stars and uses far less GPU memory than 1.5x
     const dpr = 1;
-
-    // weak devices: fewer stars and a static sky (no twinkle animation)
-    const nav = navigator as Navigator & { deviceMemory?: number };
-    const lite = (nav.hardwareConcurrency ?? 8) <= 4 || (nav.deviceMemory ?? 8) <= 2;
-    if (lite) wrap.classList.add("sb-lite");
+    wrap.classList.toggle("sb-lite", lite);
 
     // star positions are stored as 0..1 so a resize redraws the same sky
     const stars: Star[] = Array.from({ length: 180 }, () => {
@@ -104,8 +107,8 @@ const SpaceBackdropBase = () => {
       drawnW = w;
       drawnH = h;
 
-      // fewer stars on small screens / small sections / weak devices
-      const density = (w < 768 ? 12000 : 9000) * (lite ? 2 : 1);
+      // fewer stars on small screens / small sections
+      const density = lite ? 12000 : w < 768 ? 12000 : 9000;
       const count = Math.min(stars.length, Math.round((w * h) / density));
 
       canvases.forEach((canvas, layer) => {
@@ -118,8 +121,8 @@ const SpaceBackdropBase = () => {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
 
-        // each canvas draws its own third of the stars
-        for (let i = layer; i < count; i += TWINKLE_LAYERS) {
+        // each canvas draws its own share of the stars
+        for (let i = layer; i < count; i += layers) {
           const s = stars[i];
           const x = s.x * w;
           const y = s.y * h;
@@ -150,19 +153,22 @@ const SpaceBackdropBase = () => {
     });
     ro.observe(host);
 
-    // pause the CSS twinkle while the section is off-screen
-    const io = new IntersectionObserver(([e]) => {
-      wrap.classList.toggle("sb-paused", !e.isIntersecting);
-    });
-    io.observe(wrap);
+    // pause the CSS twinkle while the section is off-screen (nothing to pause in lite mode)
+    let io: IntersectionObserver | undefined;
+    if (!lite) {
+      io = new IntersectionObserver(([e]) => {
+        wrap.classList.toggle("sb-paused", !e.isIntersecting);
+      });
+      io.observe(wrap);
+    }
 
     return () => {
       clearTimeout(timer);
       cancelAnimationFrame(raf);
       ro.disconnect();
-      io.disconnect();
+      io?.disconnect();
     };
-  }, []);
+  }, [lite, layers]);
 
   return (
     <div
@@ -176,7 +182,7 @@ const SpaceBackdropBase = () => {
     >
       <style>{TWINKLE_CSS}</style>
 
-      {Array.from({ length: TWINKLE_LAYERS }, (_, i) => (
+      {Array.from({ length: layers }, (_, i) => (
         <canvas
           key={i}
           ref={(el) => {
@@ -212,6 +218,22 @@ function useMediaQuery(query: string) {
   );
 }
 
+// weak hardware (<= 4 cores, <= 2 GB RAM) or the user turned on Data Saver -> use the lightweight path.
+// Tune the thresholds here if you want more or fewer devices on the light path.
+const noopSubscribe = () => () => {};
+function weakSnapshot() {
+  const n = navigator as Navigator & {
+    deviceMemory?: number;
+    connection?: { saveData?: boolean };
+  };
+  return (n.hardwareConcurrency ?? 8) <= 4 || (n.deviceMemory ?? 8) <= 2 || !!n.connection?.saveData;
+}
+function useWeakDevice() {
+  return useSyncExternalStore(noopSubscribe, weakSnapshot, () => false);
+}
+
+const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+
 /* ---------------- Draggable card ---------------- */
 
 type Bounds = { left: number; right: number; top: number; bottom: number };
@@ -222,6 +244,7 @@ export const DraggableCardBody = ({
   style,
   constraints,
   flat = false,
+  simple = false,
   touch = false,
   unit = 1,
   onFront,
@@ -233,6 +256,8 @@ export const DraggableCardBody = ({
   constraints?: Bounds;
   /** no tilt / hover-grow (used while the book is open; it can still be dragged) */
   flat?: boolean;
+  /** lightweight mode: no 3D transform, no tilt, no hover scale (phones / weak devices) */
+  simple?: boolean;
   /** touch screens: only drag sideways so the page can still scroll vertically */
   touch?: boolean;
   /** card size relative to desktop (keeps the tilt feeling the same on small cards) */
@@ -290,7 +315,7 @@ export const DraggableCardBody = ({
 
   // at most ONE layout read per animation frame, however fast the mouse fires events
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (flat) return;
+    if (flat || simple) return;
     lastPt.current.x = e.clientX;
     lastPt.current.y = e.clientY;
     if (rafRef.current) return;
@@ -334,17 +359,11 @@ export const DraggableCardBody = ({
         mouseX.set(0);
         mouseY.set(0);
       }}
-      style={{
-        ...style,
-        x,
-        y,
-        rotateX,
-        rotateY,
-      }}
-      whileHover={flat || touch ? undefined : { scale: 1.02 }}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={handleMouseLeave}
-      className={cn("relative transform-3d", className)}
+      style={simple ? { ...style, x, y } : { ...style, x, y, rotateX, rotateY }}
+      whileHover={flat || touch || simple ? undefined : { scale: 1.02 }}
+      onMouseMove={simple ? undefined : handleMouseMove}
+      onMouseLeave={simple ? undefined : handleMouseLeave}
+      className={cn("relative", !simple && "transform-3d", className)}
     >
       {children}
     </motion.div>
@@ -357,13 +376,15 @@ export const DraggableCardContainer = React.forwardRef<
     className?: string;
     style?: React.CSSProperties;
     children?: React.ReactNode;
+    /** lightweight mode: no perspective context */
+    flat?: boolean;
   }
->(({ className, style, children }, ref) => {
+>(({ className, style, children, flat = false }, ref) => {
   return (
     <div
       ref={ref}
       style={style}
-      className={cn("[perspective:3000px]", className)}
+      className={cn(!flat && "[perspective:3000px]", className)}
     >
       {children}
     </div>
@@ -529,7 +550,7 @@ const EDGE_NOISE = makeNoise(1.1, [0.35, 0.27, 0.14], 1.2, -0.3);
 
 // Layered page edges + page stacks are built from ::before / ::after (no static images).
 // Grain textures only switch on once the section has set data-fx (after first paint / idle),
-// so the books appear immediately and the noise fades in afterwards.
+// and never on the lightweight path, so the books appear immediately.
 const BOOK_CSS = `
   .sb-edge {
     background-color: #e6d9b6;
@@ -568,15 +589,19 @@ const BOOK_CSS = `
 `;
 
 /* ---------------- Book cover (flat face) ---------------- */
+// `mini` = the lightweight phone / low-end version: bigger title + number (it gets scaled down a lot),
+// no tagline, no grain layer.
 
 const BookCover = ({
   service,
   index,
   hint = false,
+  mini = false,
 }: {
   service: Service;
   index: number;
   hint?: boolean;
+  mini?: boolean;
 }) => {
   const { title, tagline, icon, accent, base, image } = service;
   const [imgFailed, setImgFailed] = useState(false);
@@ -598,6 +623,8 @@ const BookCover = ({
         <img
           src={image}
           alt={title}
+          width={PAGE_W}
+          height={PAGE_H}
           draggable={false}
           loading="lazy"
           decoding="async"
@@ -625,7 +652,9 @@ const BookCover = ({
         aria-hidden
         className="pointer-events-none absolute inset-0"
         style={{
-          background: `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
+          background: mini
+            ? `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.86) 30%, rgba(${base},0.35) 62%, rgba(${base},0.9) 100%)`
+            : `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
         }}
       />
       {/* accent tint (plain translucent layer: blend modes are slow on low-end GPUs) */}
@@ -637,11 +666,13 @@ const BookCover = ({
         }}
       />
 
-      {/* matte cloth / leather grain (switched on after first paint, see BOOK_CSS) */}
-      <div
-        aria-hidden
-        className="sb-grain pointer-events-none absolute inset-0 opacity-60"
-      />
+      {/* matte cloth / leather grain (switched on after first paint, see BOOK_CSS) - skipped in mini */}
+      {!mini && (
+        <div
+          aria-hidden
+          className="sb-grain pointer-events-none absolute inset-0 opacity-60"
+        />
+      )}
       {/* edge wear: the board is slightly darker where hands hold it */}
       <div
         aria-hidden
@@ -691,7 +722,7 @@ const BookCover = ({
       {/* text */}
       <div className="absolute top-[34px] right-[34px] bottom-[30px] left-[62px] flex flex-col items-center">
         <span
-          className="font-serif text-[18px] tracking-[0.35em]"
+          className={cn("font-serif tracking-[0.35em]", mini ? "text-[28px]" : "text-[18px]")}
           style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.8)" }}
         >
           {String(index + 1).padStart(2, "0")}
@@ -704,7 +735,10 @@ const BookCover = ({
         </div>
 
         <h3
-          className="mt-4 text-center font-serif text-[38px] leading-[1.08] font-semibold"
+          className={cn(
+            "text-center font-serif leading-[1.08] font-semibold",
+            mini ? "mt-6 text-[56px]" : "mt-4 text-[38px]",
+          )}
           style={{
             color: GOLD_TEXT,
             textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 24px rgba(${accent},0.4)`,
@@ -713,19 +747,21 @@ const BookCover = ({
           {title}
         </h3>
 
-        <div className="mt-auto flex flex-col items-center">
-          <span
-            className="text-center text-[11px] tracking-[0.35em] uppercase"
-            style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.9)" }}
-          >
-            {tagline}
-          </span>
-          {hint && (
-            <span className="mt-2 text-[10px] tracking-[0.3em] text-white/60 uppercase">
-              Click or tap to open
+        {!mini && (
+          <div className="mt-auto flex flex-col items-center">
+            <span
+              className="text-center text-[11px] tracking-[0.35em] uppercase"
+              style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.9)" }}
+            >
+              {tagline}
             </span>
-          )}
-        </div>
+            {hint && (
+              <span className="mt-2 text-[10px] tracking-[0.3em] text-white/60 uppercase">
+                Click or tap to open
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* light sheen */}
@@ -754,6 +790,8 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
         <img
           src={image}
           alt={title}
+          width={PAGE_W}
+          height={PAGE_H}
           draggable={false}
           decoding="async"
           onError={() => setImgFailed(true)}
@@ -1259,7 +1297,7 @@ const RightPage = ({
   );
 };
 
-/* ---------------- Card: a 3D book that opens in place (desktop / tablet) ---------------- */
+/* ---------------- RICH path: a 3D book that opens in place (fine pointer, decent hardware) ---------------- */
 
 const COVER_EASE = [0.55, 0.02, 0.2, 1] as const;
 
@@ -1269,15 +1307,7 @@ const edgeVars = (dir: string, base: string) =>
 
 type Fit = { scale: number; dx: number; dy: number };
 
-const ServiceCardBase = ({
-  service,
-  index,
-  unit,
-  open,
-  onOpen,
-  onClose,
-  onFit,
-}: {
+type BookProps = {
   service: Service;
   index: number;
   unit: number; // card size relative to desktop (0.55 - 1)
@@ -1286,7 +1316,9 @@ const ServiceCardBase = ({
   onClose: () => void;
   /** tells the parent how big the open book is, so dragging can keep it inside the section */
   onFit?: (fit: Fit) => void;
-}) => {
+};
+
+const BookCard3DBase = ({ service, index, unit, open, onOpen, onClose, onFit }: BookProps) => {
   const { title, accent, base } = service;
   const rootRef = useRef<HTMLDivElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -1339,12 +1371,12 @@ const ServiceCardBase = ({
     );
     const hw = PAGE_W * scale;
     const hh = (PAGE_H * scale) / 2;
-    const clamp = (v: number, min: number, max: number) =>
+    const clampTo = (v: number, min: number, max: number) =>
       Math.min(Math.max(v, min), Math.max(min, max));
     const next = {
       scale,
-      dx: clamp(cx, hw + margin, a.width - hw - margin) - cx,
-      dy: clamp(cy, hh + margin, a.height - hh - margin) - cy,
+      dx: clampTo(cx, hw + margin, a.width - hw - margin) - cx,
+      dy: clampTo(cy, hh + margin, a.height - hh - margin) - cy,
     };
     setFit(next);
     onFitRef.current?.(next);
@@ -1709,11 +1741,89 @@ const ServiceCardBase = ({
   );
 };
 
-// memoized: opening / dragging one book doesn't re-render the other six
-const ServiceCard = memo(ServiceCardBase);
+const BookCard3D = memo(BookCard3DBase);
 
-/* ---------------- Full-screen sheet (phones, small windows, landscape phones) ---------------- */
-// The open book would be unreadably small on a phone, so there the details open as a scrollable sheet.
+/* ---------------- SIMPLE path: flat cover (phones, touch screens, weak devices) ---------------- */
+// One static, scaled cover. No preserve-3d, no perspective, no springs, no hover scale.
+// A tap (pointer barely moved) opens the details sheet; a drag just moves the book.
+
+const FlatCard = ({
+  service,
+  index,
+  scale,
+  onOpen,
+}: {
+  service: Service;
+  index: number;
+  scale: number;
+  onOpen: (index: number) => void;
+}) => {
+  const down = useRef<{ x: number; y: number } | null>(null);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${service.title}`}
+      className="relative h-full w-full cursor-pointer overflow-hidden rounded-md outline-none select-none focus-visible:ring-2 focus-visible:ring-[#e8c476]/80"
+      // one cheap static shadow (no filters)
+      style={{ boxShadow: "0 10px 22px rgba(0,0,0,0.55), 0 0 0 1px rgba(232,196,118,0.22)" }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(index);
+        }
+      }}
+      onPointerDown={(e) => {
+        down.current = { x: e.clientX, y: e.clientY };
+      }}
+      onPointerCancel={() => {
+        down.current = null;
+      }}
+      onPointerUp={(e) => {
+        const d = down.current;
+        down.current = null;
+        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 8) onOpen(index);
+      }}
+    >
+      <div
+        style={{
+          width: PAGE_W,
+          height: PAGE_H,
+          transform: `scale(${scale})`,
+          transformOrigin: "top left",
+        }}
+      >
+        <BookCover service={service} index={index} mini />
+      </div>
+    </div>
+  );
+};
+
+type CardProps = BookProps & { simple: boolean; cardW: number };
+
+// memoized: opening / dragging one book doesn't re-render the other six
+const ServiceCard = memo(function ServiceCard({ simple, cardW, ...rest }: CardProps) {
+  return simple ? (
+    <FlatCard service={rest.service} index={rest.index} scale={cardW / PAGE_W} onOpen={rest.onOpen} />
+  ) : (
+    <BookCard3D {...rest} />
+  );
+});
+
+/* ---------------- Details sheet (phones, tablets, small windows, weak devices) ---------------- */
+// Native-size, single-column, scrollable. Real 15-16px text and 44px+ tap targets,
+// no scaling of a 420px page, no blur, no heavy shadows. Rendered in a portal so no parent
+// transform / containment can break `position: fixed`.
+
+const SHEET_CSS = `
+  @keyframes sb-sheet-in {
+    from { transform: translateY(24px); opacity: 0; }
+    to { transform: none; opacity: 1; }
+  }
+  .sb-sheet { animation: sb-sheet-in 0.22s ease-out both; }
+  @media (prefers-reduced-motion: reduce) { .sb-sheet { animation: none; } }
+`;
 
 const ServiceSheet = ({
   service,
@@ -1724,60 +1834,196 @@ const ServiceSheet = ({
   index: number;
   onClose: () => void;
 }) => {
-  const [vw, setVw] = useState(0);
+  const { title, desc, script, accent, base, image, features, about, steps, faqs } = service;
+  const dark = shade(accent, 0.55);
+  const btnTop = shade(accent, 0.74);
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImage = !!image && !imgFailed;
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    const update = () => setVw(window.innerWidth);
-    update();
-    window.addEventListener("resize", update);
-    const prev = document.body.style.overflow;
+    const prevOverflow = document.body.style.overflow;
+    const prevFocus = document.activeElement as HTMLElement | null;
     document.body.style.overflow = "hidden"; // lock page scroll behind the sheet
+    closeRef.current?.focus({ preventScroll: true });
     return () => {
-      window.removeEventListener("resize", update);
-      document.body.style.overflow = prev;
+      document.body.style.overflow = prevOverflow;
+      prevFocus?.focus?.({ preventScroll: true });
     };
   }, []);
 
-  if (!vw) return null;
+  const stamp = {
+    color: `rgb(${dark})`,
+    border: `1.5px solid rgba(${dark},0.7)`,
+    background: `rgba(${accent},0.16)`,
+  } as const;
 
-  // wide enough: pages side by side like a real book, otherwise stacked
-  const sideBySide = vw >= PAGE_W * 2 + 48;
-  const w = sideBySide ? PAGE_W * 2 : PAGE_W;
-  const h = sideBySide ? PAGE_H : PAGE_H * 2;
-  const s = Math.min(1, (vw - 32) / w);
+  if (typeof document === "undefined") return null;
 
-  return (
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={service.title}
+      aria-label={title}
       // plain dark overlay: backdrop-blur is very expensive on mid-range phones
-      className="fixed inset-0 z-[1000] overflow-y-auto bg-black/85"
+      className="fixed inset-0 z-[1000] overflow-y-auto overscroll-contain bg-black/85"
       onClick={onClose}
     >
-      <div className="flex min-h-full items-center justify-center p-4">
-        <div
-          style={{ width: w * s, height: h * s }}
-          onClick={(e) => e.stopPropagation()}
+      <style>{SHEET_CSS}</style>
+      <div
+        className="sb-sheet relative mx-auto min-h-full w-full max-w-xl sm:my-8 sm:min-h-0 sm:rounded-2xl"
+        style={{ background: "#f1e7c9", color: INK, fontFamily: BOOK_FONT }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* close button: stays visible while the sheet scrolls */}
+        <div className="sticky top-0 z-10 h-0">
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="absolute right-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-[26px] leading-none text-white"
+            style={{ top: "calc(env(safe-area-inset-top, 0px) + 12px)" }}
+          >
+            ×
+          </button>
+        </div>
+
+        {/* hero */}
+        <header
+          className="relative overflow-hidden px-5 pt-16 pb-6 sm:rounded-t-2xl"
+          style={{
+            background: `radial-gradient(circle at 70% 30%, rgba(${accent},0.45), transparent 60%), linear-gradient(160deg, rgb(${base}), #02040f)`,
+            paddingTop: "calc(env(safe-area-inset-top, 0px) + 64px)",
+          }}
         >
+          {showImage && (
+            <img
+              src={image}
+              alt=""
+              draggable={false}
+              decoding="async"
+              onError={() => setImgFailed(true)}
+              className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-45"
+            />
+          )}
           <div
-            className="grid overflow-hidden rounded-lg shadow-2xl"
+            aria-hidden
+            className="pointer-events-none absolute inset-0"
             style={{
-              width: w,
-              height: h,
-              transform: `scale(${s})`,
-              transformOrigin: "top left",
-              gridTemplateColumns: `repeat(${sideBySide ? 2 : 1}, ${PAGE_W}px)`,
-              gridAutoRows: `${PAGE_H}px`,
-              boxShadow: `0 0 60px rgba(${service.accent},0.4)`,
+              background: `linear-gradient(to bottom, rgba(${base},0.55), rgba(${base},0.9))`,
+            }}
+          />
+          <div className="relative">
+            <span className="font-serif text-[13px] tracking-[0.3em]" style={{ color: `rgb(${GOLD})` }}>
+              {String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
+            </span>
+            <h3
+              className="mt-2 font-serif text-[32px] leading-[1.1] font-semibold"
+              style={{ color: GOLD_TEXT, textShadow: "0 2px 10px rgba(0,0,0,0.7)" }}
+            >
+              {title}
+            </h3>
+            <p className="mt-3 max-w-md text-[16px] leading-relaxed text-white/90">{desc}</p>
+            <span
+              className="mt-4 block text-[24px] leading-none text-white italic"
+              style={{ fontFamily: SCRIPT_FONT }}
+            >
+              {script}
+            </span>
+          </div>
+        </header>
+
+        {/* content */}
+        <div
+          className="flex flex-col gap-8 px-5 pt-7"
+          style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 28px)" }}
+        >
+          <section>
+            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[0]}</h4>
+            <Flourish className="mt-3 w-40" />
+            <ul className="mt-2">
+              {features.map((f, i) => (
+                <li
+                  key={f.title}
+                  className="flex items-center gap-4 py-3"
+                  style={i ? { borderTop: "1px solid rgba(90,65,25,0.2)" } : undefined}
+                >
+                  <div
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
+                    style={stamp}
+                  >
+                    {f.icon}
+                  </div>
+                  <div>
+                    <div className="text-[16px] leading-tight font-semibold">{f.title}</div>
+                    <div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
+                      {f.desc}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section>
+            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[1]}</h4>
+            <Flourish className="mt-3 w-40" />
+            <p className="mt-3 text-[15px] leading-relaxed italic" style={{ color: INK_SOFT }}>
+              {about}
+            </p>
+            <ol className="mt-3 flex flex-col gap-4">
+              {steps.map(([t, d], i) => (
+                <li key={t} className="flex items-start gap-3">
+                  <span
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[16px] font-semibold"
+                    style={stamp}
+                  >
+                    {i + 1}
+                  </span>
+                  <div>
+                    <div className="text-[16px] leading-tight font-semibold">{t}</div>
+                    <div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
+                      {d}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+
+          <section>
+            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[2]}</h4>
+            <Flourish className="mt-3 w-40" />
+            <div className="mt-4 flex flex-col gap-5">
+              {faqs.map(([q, a]) => (
+                <div key={q}>
+                  <h5 className="text-[16px] leading-tight font-semibold">{q}</h5>
+                  <p className="mt-1 text-[14px] leading-relaxed italic" style={{ color: INK_SOFT }}>
+                    {a}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <a
+            href="#contact"
+            onClick={onClose}
+            className="flex min-h-12 items-center justify-center gap-2 rounded-md px-5 py-3 text-[15px] font-semibold tracking-[0.18em] uppercase"
+            style={{
+              color: "#fff6dc",
+              textShadow: "0 1px 1px rgba(0,0,0,0.45)",
+              background: `linear-gradient(180deg, rgb(${btnTop}), rgb(${shade(accent, 0.5)}))`,
+              boxShadow: "inset 0 0 0 1px rgba(255,236,190,0.5)",
             }}
           >
-            <LeftPage service={service} index={index} />
-            <RightPage service={service} index={index} open onClose={onClose} />
-          </div>
+            Get Started <span aria-hidden>→</span>
+          </a>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };
 
@@ -1785,7 +2031,7 @@ const ServiceSheet = ({
 
 // Put your images in /public/services/ and they show up on the cover and the left page.
 // Until the file exists, a placeholder is shown.
-// Tip: use .webp / .avif at ~840x1120 (2x of 420x560), under ~80 KB each.
+// Tip: use .webp / .avif at ~840x1120 (2x of 420x560), under ~80 KB each. (Smaller files = the biggest mobile speed win.)
 // `base` values are the original ones multiplied by ~0.78 (a little darker).
 // Each book has 3 pages: features (page 1), about + steps (page 2), FAQ (page 3).
 const SERVICES: Service[] = [
@@ -2036,8 +2282,7 @@ const SeoContent = memo(function SeoContent() {
   );
 });
 
-// Where each card rests in the pile, as a fraction (0..1) of the free room inside the section.
-// Same loose pile as the original desktop layout, but it now scales with the section size.
+// Where each card rests in the pile on tablets / desktop, as a fraction (0..1) of the free room inside the section.
 const SPOTS = [
   { x: 0.22, y: 0.37 }, // 0 Web Development — upper-left
   { x: 0.15, y: 0.66 }, // 1 Web Redesign — lower-left
@@ -2049,36 +2294,52 @@ const SPOTS = [
 ];
 
 function computeLayout(W: number) {
-  // card size: full size from 1280px up, shrinking smoothly down to MIN_UNIT on phones
-  const unit = Math.min(1, Math.max(MIN_UNIT, W / 1280));
+  const narrow = W < 768;
+  // phones: card width is ~46% of the screen so two books always fit side by side.
+  // wider screens: full size from 1280px up, shrinking smoothly down to MIN_UNIT.
+  const unit = narrow
+    ? clamp((W * 0.46) / BASE_CARD_W, 0.45, 0.62)
+    : clamp(W / 1280, MIN_UNIT, 1);
   const cardW = BASE_CARD_W * unit;
   const cardH = BASE_CARD_H * unit;
-  const height = Math.round(cardH * 3.28); // 1400px on desktop, same proportion everywhere
   const freeX = Math.max(0, W - cardW);
-  const freeY = Math.max(0, height - cardH);
-  const narrow = W < 768;
 
-  const spots = SPOTS.map((s) => {
-    let { x, y } = s;
-    if (narrow) {
-      // phones: spread the pile out so every book is visible and easy to grab
-      x = 0.04 + ((x - 0.257) / (0.707 - 0.257)) * 0.92;
-      y = 0.5 + (y - 0.5) * 3;
-    }
-    const left = x * freeX;
-    const top = y * freeY;
-    return {
-      left,
-      top,
-      // how far the card may travel from where it rests: never outside the section
-      constraints: {
-        left: -left,
-        right: freeX - left,
-        top: -top,
-        bottom: freeY - top,
-      },
-    };
-  });
+  let height: number;
+  let places: { left: number; top: number }[];
+
+  if (narrow) {
+    // phone: a zig-zag grid below the heading. Every book is visible, reachable, and inside the section.
+    const headerH = 220;
+    const pitch = cardH * 0.82; // slight overlap so it still feels like a pile
+    const stagger = pitch * 0.2;
+    const rows = Math.ceil(SERVICES.length / 2);
+    height = Math.round(headerH + (rows - 1) * pitch + cardH + 40);
+    places = SERVICES.map((_, i) => {
+      const alone = i === SERVICES.length - 1 && SERVICES.length % 2 === 1;
+      const col = i % 2;
+      return {
+        left: alone ? freeX / 2 : col ? freeX * 0.97 : freeX * 0.03,
+        top: headerH + Math.floor(i / 2) * pitch + (col && !alone ? stagger : 0),
+      };
+    });
+  } else {
+    height = Math.round(cardH * 3.28); // 1400px on desktop, same proportion everywhere
+    const freeY = Math.max(0, height - cardH);
+    places = SPOTS.map((s) => ({ left: s.x * freeX, top: s.y * freeY }));
+  }
+
+  const freeY = Math.max(0, height - cardH);
+  const spots = places.map(({ left, top }) => ({
+    left,
+    top,
+    // how far the card may travel from where it rests: never outside the section
+    constraints: {
+      left: -left,
+      right: freeX - left,
+      top: -top,
+      bottom: freeY - top,
+    },
+  }));
 
   return { unit, cardW, cardH, height, spots };
 }
@@ -2098,6 +2359,7 @@ const CardSlot = memo(function CardSlot({
   bookOpen,
   openFit,
   touch,
+  simple,
   flat,
   onFront,
   onOpen,
@@ -2112,6 +2374,7 @@ const CardSlot = memo(function CardSlot({
   bookOpen: boolean;
   openFit: Fit | null;
   touch: boolean;
+  simple: boolean;
   flat: boolean;
   onFront: (i: number) => void;
   onOpen: (i: number) => void;
@@ -2154,6 +2417,7 @@ const CardSlot = memo(function CardSlot({
     <DraggableCardBody
       unit={layout.unit}
       touch={touch}
+      simple={simple}
       flat={flat}
       constraints={constraints}
       onFront={handleFront}
@@ -2161,7 +2425,7 @@ const CardSlot = memo(function CardSlot({
       className={cn(
         "absolute",
         item.className,
-        "transition-[rotate] duration-500 motion-reduce:transition-none",
+        !simple && "transition-[rotate] duration-500 motion-reduce:transition-none",
         bookOpen && "rotate-0!",
       )}
     >
@@ -2169,6 +2433,8 @@ const CardSlot = memo(function CardSlot({
         service={item}
         index={i}
         unit={layout.unit}
+        cardW={layout.cardW}
+        simple={simple}
         open={bookOpen}
         onOpen={onOpen}
         onClose={onClose}
@@ -2188,16 +2454,26 @@ export default function DraggableCardDemo() {
   const [width, setWidth] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // phones / small windows / landscape phones open the details as a sheet instead of an in-place book
+  // small windows / landscape phones
   const compact = useMediaQuery("(max-width: 819px), (max-height: 619px)");
   // touch screens only drag sideways so the page can still be scrolled with a finger
   const touch = useMediaQuery("(pointer: coarse)");
+  const weak = useWeakDevice();
   const reduceMotion = useReducedMotion();
 
-  // after first paint (browser idle), switch on the grain textures: the books show up first, texture follows
+  // LIGHT path for phones, tablets, touch screens, small windows and weak devices:
+  // flat covers, details sheet, static sky, no grain. Everything else gets the full 3D experience.
+  const simple = compact || touch || weak;
+
+  // after first paint (browser idle), switch on the grain textures: the books show up first, texture follows.
+  // never on the light path.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
+    if (simple) {
+      el.removeAttribute("data-fx");
+      return;
+    }
     const on = () => el.setAttribute("data-fx", "1");
     const w = window as Window & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
@@ -2209,14 +2485,17 @@ export default function DraggableCardDemo() {
     }
     const id = window.setTimeout(on, 300);
     return () => clearTimeout(id);
-  }, []);
+  }, [simple]);
 
   // measure the section width: first measure is immediate (before first paint), later resizes are debounced
   useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     let t = 0;
-    const update = () => setWidth(Math.round(el.clientWidth));
+    const update = () => {
+      const next = Math.round(el.clientWidth);
+      setWidth((prev) => (prev === next ? prev : next));
+    };
     update();
     const ro = new ResizeObserver(() => {
       clearTimeout(t);
@@ -2231,7 +2510,7 @@ export default function DraggableCardDemo() {
 
   const layout = useMemo(() => (width ? computeLayout(width) : null), [width]);
 
-  // Esc closes the open book
+  // Esc closes the open book / sheet
   useEffect(() => {
     if (active === null) return;
     const onKey = (e: KeyboardEvent) => {
@@ -2267,6 +2546,7 @@ export default function DraggableCardDemo() {
     <MotionConfig reducedMotion="user">
       <DraggableCardContainer
         ref={wrapRef}
+        flat={simple}
         className="relative flex w-full items-center justify-center overflow-clip"
         style={{
           height: layout ? layout.height : 1400,
@@ -2275,8 +2555,8 @@ export default function DraggableCardDemo() {
           containIntrinsicSize: `auto ${layout ? layout.height : 1400}px`,
         }}
       >
-        <SpaceBackdrop />
-        <style>{BOOK_CSS}</style>
+        <SpaceBackdrop lite={simple} />
+        {!simple && <style>{BOOK_CSS}</style>}
         <SeoContent />
 
         {/* section heading + how-to line (sits behind the books so they can be dragged over it) */}
@@ -2307,13 +2587,13 @@ export default function DraggableCardDemo() {
               : "Drag the books around to explore, then click one to open it and see what\u2019s included."}
           </p>
         </header>
-        <p className="absolute top-1/2 mx-auto max-w-sm -translate-y-3/4 px-6 text-center text-2xl font-black text-neutral-400 md:text-4xl dark:text-neutral-800">
+        <p className="pointer-events-none absolute top-1/2 mx-auto max-w-sm -translate-y-3/4 px-6 text-center text-2xl font-black text-neutral-400 md:text-4xl dark:text-neutral-800">
           What we do best.
         </p>
 
         {layout &&
           SERVICES.map((item, i) => {
-            const bookOpen = active === i && !compact;
+            const bookOpen = active === i && !simple;
             return (
               <CardSlot
                 key={item.title}
@@ -2325,6 +2605,7 @@ export default function DraggableCardDemo() {
                 bookOpen={bookOpen}
                 openFit={bookOpen ? openFit : null}
                 touch={touch}
+                simple={simple}
                 flat={bookOpen || !!reduceMotion}
                 onFront={bringToFront}
                 onOpen={handleOpen}
@@ -2335,7 +2616,7 @@ export default function DraggableCardDemo() {
           })}
       </DraggableCardContainer>
 
-      {active !== null && compact && (
+      {active !== null && simple && (
         <ServiceSheet
           service={SERVICES[active]}
           index={active}
