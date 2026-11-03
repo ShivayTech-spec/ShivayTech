@@ -1,8 +1,8 @@
 "use client"
 
-import React, { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import React, { Suspense, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
-import { OrbitControls, useTexture } from "@react-three/drei"
+import { OrbitControls, PerformanceMonitor, useTexture } from "@react-three/drei"
 import * as THREE from "three"
 
 const RADIUS = 9
@@ -27,6 +27,7 @@ const STAGE_SHIFT_OPEN = 0
 const TILE_DEPTH = 0.01 // slab thickness
 const TILE_BEVEL = 0.02 // edge bevel size
 const TILE_RADIUS = 0.02 // corner roundness
+const FACE_Z = TILE_DEPTH / 2 + TILE_BEVEL + 0.002
 
 // Orbit position switching
 const VIEW_INTERVAL = 12000 // ms between position changes
@@ -38,7 +39,6 @@ const VIEW_ANGLES = [68, 105, 200]
 
 // const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
-
 
 // Video that fills the big center circle (put your file in /public/videos/)
 const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
@@ -53,12 +53,23 @@ const PROFILES = [
   "/images/vs-code.jpg",
   "/images/social-media.jpg",
   "/images/react.jpg",
-    "/images/google-ads.jpg",
-    "/images/growth.jpg",
-
-  
-  
+  "/images/google-ads.jpg",
+  "/images/growth.jpg",
 ]
+
+const CARD_ANGLES = PROFILES.map((_, i) => {
+  const a = (i * Math.PI) / 4
+  return { cos: Math.cos(a), sin: Math.sin(a) }
+})
+
+// ---- Canvas config hoisted so React never re-creates these objects ----
+const CANVAS_STYLE: React.CSSProperties = { position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }
+const CANVAS_STYLE_COVERED: React.CSSProperties = { ...CANVAS_STYLE, pointerEvents: "none" }
+const CANVAS_CAMERA = { position: [-9.3, 5.3, 9.3] as [number, number, number], fov: 50 }
+const CANVAS_GL = { antialias: false, powerPreference: "high-performance" as const, alpha: true }
+const CANVAS_DPR: [number, number] = [1, 1.5]
+const CANVAS_RESIZE = { scroll: false } // no re-measure / canvas reset on every page scroll
+const onCanvasCreated = ({ gl }: { gl: THREE.WebGLRenderer }) => gl.setClearColor(0x000000, 0)
 
 // Catches errors (like a missing texture file) so they can't crash the whole 3D scene
 class SafeBoundary extends React.Component<
@@ -79,7 +90,7 @@ class SafeBoundary extends React.Component<
 
 // Soft round sprite so particles render as glowing dots, not squares
 function useDotTexture() {
-  return useMemo(() => {
+  const tex = useMemo(() => {
     const size = 64
     const canvas = document.createElement("canvas")
     canvas.width = canvas.height = size
@@ -92,9 +103,11 @@ function useDotTexture() {
     ctx.fillRect(0, 0, size, size)
     return new THREE.CanvasTexture(canvas)
   }, [])
+  useEffect(() => () => tex.dispose(), [tex])
+  return tex
 }
 
-function HeroParticles({ count }: { count: number }) {
+const HeroParticles = memo(function HeroParticles({ count }: { count: number }) {
   const dot = useDotTexture()
 
   const { positions, colors } = useMemo(() => {
@@ -136,7 +149,7 @@ function HeroParticles({ count }: { count: number }) {
       />
     </points>
   )
-}
+})
 
 function roundedRectShape(w: number, h: number, r: number) {
   const s = new THREE.Shape()
@@ -201,8 +214,40 @@ function useGlowTextures() {
   }, [])
 }
 
-function HeroImages({ images }: { images: string[] }) {
-  const textures = useTexture(images)
+// One draw call for N copies of the same mesh (all tiles are static, so matrices are written once)
+function Instances({
+  geometry,
+  matrices,
+  children,
+}: {
+  geometry: THREE.BufferGeometry
+  matrices: THREE.Matrix4[]
+  children: React.ReactNode
+}) {
+  const ref = useRef<THREE.InstancedMesh>(null)
+  useLayoutEffect(() => {
+    const mesh = ref.current
+    if (!mesh) return
+    for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i])
+    mesh.instanceMatrix.needsUpdate = true
+  }, [matrices])
+  return (
+    <instancedMesh
+      ref={ref}
+      args={[undefined, undefined, matrices.length]}
+      geometry={geometry}
+      frustumCulled={false}
+      matrixAutoUpdate={false}
+    >
+      {children}
+    </instancedMesh>
+  )
+}
+
+const HeroImages = memo(function HeroImages({ images }: { images: string[] }) {
+  // identical URLs share ONE texture (was: one GPU texture per tile)
+  const unique = useMemo(() => Array.from(new Set(images)), [images])
+  const textures = useTexture(unique) as THREE.Texture[]
   const { outerTex, innerTex } = useGlowTextures()
 
   const { bodyGeo, faceGeo, glowGeo } = useMemo(() => {
@@ -213,17 +258,14 @@ function HeroImages({ images }: { images: string[] }) {
       bevelEnabled: true,
       bevelThickness: TILE_BEVEL,
       bevelSize: TILE_BEVEL,
-      bevelSegments: 5,
-      curveSegments: 14,
+      bevelSegments: 2,
+      curveSegments: 6,
     })
     bodyGeo.translate(0, 0, -TILE_DEPTH / 2)
 
     // rounded image face, inset so the bevel rim stays visible
     const faceSize = IMAGE_SIZE - 0.14
-    const faceGeo = new THREE.ShapeGeometry(
-      roundedRectShape(faceSize, faceSize, TILE_RADIUS * 0.8),
-      14
-    )
+    const faceGeo = new THREE.ShapeGeometry(roundedRectShape(faceSize, faceSize, TILE_RADIUS * 0.8), 6)
     const pos = faceGeo.attributes.position
     const uv = faceGeo.attributes.uv
     for (let i = 0; i < pos.count; i++) {
@@ -235,77 +277,124 @@ function HeroImages({ images }: { images: string[] }) {
     return { bodyGeo, faceGeo, glowGeo }
   }, [])
 
-  const half = TILE_DEPTH / 2 + TILE_BEVEL + 0.002
+  // per-tile matrices, grouped by part (and by texture for the image faces)
+  const parts = useMemo(() => {
+    const n = images.length
+    const indexOf = new Map(unique.map((u, i) => [u, i]))
+    const tile = new THREE.Matrix4()
+    const pos = new THREE.Vector3()
+    const q = new THREE.Quaternion()
+    const e = new THREE.Euler()
+    const one = new THREE.Vector3(1, 1, 1)
+    const qId = new THREE.Quaternion()
+    const qFlip = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI, 0))
+    const local = {
+      front: new THREE.Matrix4().compose(new THREE.Vector3(0, 0, FACE_Z), qId, one),
+      frontGlow: new THREE.Matrix4().compose(new THREE.Vector3(0, 0, FACE_Z + 0.001), qId, one),
+      back: new THREE.Matrix4().compose(new THREE.Vector3(0, 0, -FACE_Z), qFlip, one),
+      backGlow: new THREE.Matrix4().compose(new THREE.Vector3(0, 0, -FACE_Z - 0.001), qFlip, one),
+    }
+    const glow: THREE.Matrix4[] = []
+    const body: THREE.Matrix4[] = []
+    const frontGlow: THREE.Matrix4[] = []
+    const backGlow: THREE.Matrix4[] = []
+    const front: THREE.Matrix4[][] = unique.map(() => [])
+    const back: THREE.Matrix4[][] = unique.map(() => [])
+
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2
+      pos.set(RADIUS * Math.cos(a), 0, RADIUS * Math.sin(a))
+      q.setFromEuler(e.set(0, Math.PI / 2 - a, 0))
+      tile.compose(pos, q, one)
+      const g = indexOf.get(images[i])!
+      glow.push(tile.clone())
+      body.push(tile.clone())
+      frontGlow.push(new THREE.Matrix4().multiplyMatrices(tile, local.frontGlow))
+      backGlow.push(new THREE.Matrix4().multiplyMatrices(tile, local.backGlow))
+      front[g].push(new THREE.Matrix4().multiplyMatrices(tile, local.front))
+      back[g].push(new THREE.Matrix4().multiplyMatrices(tile, local.back))
+    }
+    return { glow, body, frontGlow, backGlow, front, back }
+  }, [images, unique])
+
+  useEffect(
+    () => () => {
+      bodyGeo.dispose()
+      faceGeo.dispose()
+      glowGeo.dispose()
+      outerTex.dispose()
+      innerTex.dispose()
+    },
+    [bodyGeo, faceGeo, glowGeo, outerTex, innerTex]
+  )
+
+  if (!images.length) return null
 
   return (
     <>
-      {textures.map((map, i) => {
-        const a = (i / textures.length) * Math.PI * 2
-        return (
-          <group
-            key={i}
-            position={[RADIUS * Math.cos(a), 0, RADIUS * Math.sin(a)]}
-            rotation={[0, Math.PI / 2 - a, 0]}
-          >
-            {/* outer neon glow (sits inside the slab, so only the part past the edges shows) */}
-            <mesh geometry={glowGeo}>
-              <meshBasicMaterial
-                map={outerTex}
-                transparent
-                opacity={0.85}
-                depthWrite={false}
-                blending={THREE.AdditiveBlending}
-                side={THREE.DoubleSide}
-                toneMapped={false}
-              />
-            </mesh>
+      {/* outer neon glow (sits inside the slab, so only the part past the edges shows) */}
+      <Instances geometry={glowGeo} matrices={parts.glow}>
+        <meshBasicMaterial
+          map={outerTex}
+          transparent
+          opacity={0.85}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          side={THREE.DoubleSide}
+          toneMapped={false}
+        />
+      </Instances>
 
-            {/* neon rim: the bevel edge around the image */}
-            <mesh geometry={bodyGeo}>
-              <meshStandardMaterial
-                color="#0b0e16"
-                metalness={0.4}
-                roughness={0.4}
-                emissive="#1a8cff"
-                emissiveIntensity={1.6}
-              />
-            </mesh>
+      {/* neon rim: the bevel edge around the image */}
+      <Instances geometry={bodyGeo} matrices={parts.body}>
+        <meshStandardMaterial
+          color="#0b0e16"
+          metalness={0.4}
+          roughness={0.4}
+          emissive="#1a8cff"
+          emissiveIntensity={1.6}
+        />
+      </Instances>
 
+      {textures.map((map, g) =>
+        parts.front[g].length ? (
+          <React.Fragment key={g}>
             {/* front */}
-            <mesh geometry={faceGeo} position={[0, 0, half]}>
+            <Instances geometry={faceGeo} matrices={parts.front[g]}>
               <meshBasicMaterial map={map} toneMapped={false} />
-            </mesh>
-            {/* front inner glow */}
-            <mesh geometry={faceGeo} position={[0, 0, half + 0.001]}>
-              <meshBasicMaterial
-                map={innerTex}
-                transparent
-                depthWrite={false}
-                blending={THREE.AdditiveBlending}
-                toneMapped={false}
-              />
-            </mesh>
-
+            </Instances>
             {/* back (so tiles on the far side still show the image) */}
-            <mesh geometry={faceGeo} position={[0, 0, -half]} rotation={[0, Math.PI, 0]}>
+            <Instances geometry={faceGeo} matrices={parts.back[g]}>
               <meshBasicMaterial map={map} toneMapped={false} />
-            </mesh>
-            {/* back inner glow */}
-            <mesh geometry={faceGeo} position={[0, 0, -half - 0.001]} rotation={[0, Math.PI, 0]}>
-              <meshBasicMaterial
-                map={innerTex}
-                transparent
-                depthWrite={false}
-                blending={THREE.AdditiveBlending}
-                toneMapped={false}
-              />
-            </mesh>
-          </group>
-        )
-      })}
+            </Instances>
+          </React.Fragment>
+        ) : null
+      )}
+
+      {/* front inner glow */}
+      <Instances geometry={faceGeo} matrices={parts.frontGlow}>
+        <meshBasicMaterial
+          map={innerTex}
+          transparent
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </Instances>
+
+      {/* back inner glow */}
+      <Instances geometry={faceGeo} matrices={parts.backGlow}>
+        <meshBasicMaterial
+          map={innerTex}
+          transparent
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </Instances>
     </>
   )
-}
+})
 
 // Every VIEW_INTERVAL ms, smoothly moves the camera to the next polar angle.
 // Only the up/down angle is changed, so the auto-rotate keeps spinning the orbit.
@@ -369,110 +458,190 @@ function HeroScrollAnimation({ progress }: { progress: React.MutableRefObject<nu
   return null
 }
 
-// Center section that sits inside the orbit (inline styles, no Tailwind needed)
-function HeroCenter({
-  scrollY,
-  shift,
+// Lowers pixel ratio only if the device actually struggles, raises it back when it recovers
+function AdaptiveQuality() {
+  const setDpr = useThree((s) => s.setDpr)
+  return (
+    <PerformanceMonitor
+      flipflops={3}
+      onChange={({ factor }) =>
+        setDpr(Math.min(window.devicePixelRatio || 1, THREE.MathUtils.lerp(1, 1.5, factor)))
+      }
+      onFallback={() => setDpr(1)}
+    />
+  )
+}
+
+// Shifts the 3D scene up on screen (without resizing it) so it lines up with the shifted center circle.
+// `shift` is the same animated value the circle uses, so the orbit and the circle always move together.
+// Only touches the projection matrix when the shift or canvas size actually changed.
+function StageOffset({ shift }: { shift: React.MutableRefObject<number> }) {
+  const { camera, size } = useThree()
+  const last = useRef({ s: NaN, w: 0, h: 0 })
+  useFrame(() => {
+    const s = shift.current
+    const l = last.current
+    if (l.s === s && l.w === size.width && l.h === size.height) return
+    l.s = s
+    l.w = size.width
+    l.h = size.height
+    const cam = camera as THREE.PerspectiveCamera
+    cam.setViewOffset(size.width, size.height, 0, size.height * s, size.width, size.height)
+  })
+  useEffect(
+    () => () => {
+      const cam = camera as THREE.PerspectiveCamera
+      cam.clearViewOffset()
+      cam.updateProjectionMatrix()
+    },
+    [camera]
+  )
+  return null
+}
+
+// ---------------------------------------------------------------------------------------
+// DOM layer (center circle + text). Animated imperatively through refs: no React re-render
+// happens while scrolling, and all per-frame writes are batched into one rAF.
+// ---------------------------------------------------------------------------------------
+type Els = {
+  centerRoot: HTMLDivElement | null
+  scaleWrap: HTMLDivElement | null
+  ring600: HTMLDivElement | null
+  ring500: HTMLDivElement | null
+  emblem: HTMLDivElement | null
+  emblemGlow: HTMLDivElement | null
+  textBox: HTMLDivElement | null
+  video: HTMLVideoElement | null
+  cards: (HTMLDivElement | null)[]
+  content: HTMLDivElement | null
+  ctaRow: HTMLDivElement | null
+}
+
+const createEls = (): Els => ({
+  centerRoot: null,
+  scaleWrap: null,
+  ring600: null,
+  ring500: null,
+  emblem: null,
+  emblemGlow: null,
+  textBox: null,
+  video: null,
+  cards: [],
+  content: null,
+  ctaRow: null,
+})
+
+const CENTER: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "center" }
+
+// same neon glow as the navbar (outer glow, wide ambient glow, inner glow, bright inner top edge)
+const NEON =
+  "0 0 25px rgba(0,110,255,0.5), 0 0 60px rgba(0,110,255,0.15), inset 0 0 30px rgba(0,110,255,0.25), inset 0 2px 8px rgba(0,110,255,0.4)"
+
+// brighter, controlled glow for the main emblem rim
+const EMBLEM_GLOW =
+  "0 0 14px rgba(0,200,255,0.9), 0 0 34px rgba(0,143,255,0.7), 0 0 80px rgba(0,107,255,0.4), inset 0 0 12px rgba(0,200,255,0.5)"
+
+const CARD_GLOW = "0 0 8px rgba(255,255,255,0.6), 0 0 25px rgba(255,255,255,0.5), 0 0 60px rgba(255,255,255,0.15)"
+
+// Ring borders/glows live on their own overlay so only `opacity` (compositor-only) animates
+const RING: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  boxSizing: "border-box",
+  borderRadius: "50%",
+  border: "2px solid rgba(0,110,255,0.9)",
+  boxShadow: NEON,
+  opacity: 0,
+  transition: "opacity 0.5s",
+  pointerEvents: "none",
+}
+
+const RADIUS_VAR = `var(--r, ${CENTER_SIZE / 2}px)` // set once per frame on the emblem, inherited by its children
+
+const circleGradient =
+  "radial-gradient(circle at 50% 35%, rgba(10,26,92,0.92) 0%, rgba(5,11,42,0.94) 60%, rgba(2,4,15,0.96) 100%)"
+
+// Center section that sits inside the orbit
+const HeroCenter = memo(function HeroCenter({
+  els,
   centerImage,
   centerVideo,
 }: {
-  scrollY: number
-  shift: number
+  els: Els
   centerImage?: string
   centerVideo?: string
 }) {
-  const [scale, setScale] = useState(1)
-  const [vp, setVp] = useState({ w: 1920, h: 1080 })
-
-  useEffect(() => {
-    const update = () => {
-      setScale(Math.min(1, window.innerWidth / 700))
-      setVp({ w: window.innerWidth, h: window.innerHeight })
-    }
-    update()
-    window.addEventListener("resize", update)
-    return () => window.removeEventListener("resize", update)
-  }, [])
-
-  const expandRadius = Math.min(scrollY / SCROLL_DISTANCE, 1) * 300
-  // 0 -> 1 during the zoom phase (after the circle has fully opened and the hold phase is over)
-  const zoom = Math.min(Math.max((scrollY - SCROLL_DISTANCE - HOLD_DISTANCE) / ZOOM_DISTANCE, 0), 1)
-  // the circle morphs into a full-screen landscape rectangle (size + corner radius, no scaling)
-  const ease = zoom * zoom * (3 - 2 * zoom)
-  const curW = CENTER_SIZE + (vp.w / scale + 4 - CENTER_SIZE) * ease
-  const curH = CENTER_SIZE + (vp.h / scale + 4 - CENTER_SIZE) * ease
-  const radius = (Math.min(curW, curH) / 2) * (1 - ease)
-  // rings, small images and text fade out as the zoom starts
-  const fade = 1 - Math.min(zoom * 3, 1)
-  const center: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "center" }
-
-  // same neon glow as the navbar (outer glow, wide ambient glow, inner glow, bright inner top edge)
-  const neon = (k: number) =>
-    `0 0 25px rgba(0,110,255,${0.5 * k}), 0 0 60px rgba(0,110,255,${0.15 * k}), inset 0 0 30px rgba(0,110,255,${0.25 * k}), inset 0 2px 8px rgba(0,110,255,${0.4 * k})`
-
-  // brighter, controlled glow for the main emblem rim
-  const emblemGlow = (k: number) =>
-    `0 0 14px rgba(0,200,255,${0.9 * k}), 0 0 34px rgba(0,143,255,${0.7 * k}), 0 0 80px rgba(0,107,255,${0.4 * k}), inset 0 0 12px rgba(0,200,255,${0.5 * k})`
-
-  const circleGradient =
-    "radial-gradient(circle at 50% 35%, rgba(10,26,92,0.92) 0%, rgba(5,11,42,0.94) 60%, rgba(2,4,15,0.96) 100%)"
-
   return (
     <div
+      ref={(el) => {
+        els.centerRoot = el
+      }}
       style={{
-        ...center,
+        ...CENTER,
         position: "absolute",
         inset: 0,
         zIndex: 10,
         pointerEvents: "none",
         perspective: 1200,
-        transform: `translateY(${-shift * vp.h}px)`,
+        willChange: "transform",
+        transform: `translateY(${-STAGE_SHIFT * 1080}px)`,
       }}
     >
-      <div style={{ transform: `scale(${scale}) rotateX(${TILT * (1 - zoom)}deg)` }}>
-        <div
-          style={{
-            ...center,
-            width: 600,
-            height: 600,
-            borderRadius: "50%",
-            border: scrollY > SCROLL_DISTANCE * 0.6 ? `2px solid rgba(0,110,255,${0.9 * fade})` : "2px solid transparent",
-            boxShadow: scrollY > SCROLL_DISTANCE * 0.6 ? neon(fade) : "none",
-            transition: "all 0.5s",
-          }}
-        >
+      <div
+        ref={(el) => {
+          els.scaleWrap = el
+        }}
+        style={{ transform: `scale(1) rotateX(${TILT}deg)` }}
+      >
+        <div style={{ ...CENTER, position: "relative", width: 600, height: 600, borderRadius: "50%" }}>
           <div
-            style={{
-              ...center,
-              position: "relative",
-              width: 500,
-              height: 500,
-              borderRadius: "50%",
-              border: scrollY > SCROLL_DISTANCE * 0.2 ? `2px solid rgba(0,110,255,${0.9 * fade})` : "2px solid transparent",
-              boxShadow: scrollY > SCROLL_DISTANCE * 0.2 ? neon(fade) : "none",
-              transition: "all 0.5s",
+            ref={(el) => {
+              els.ring600 = el
             }}
-          >
+            style={RING}
+          />
+          <div style={{ ...CENTER, position: "relative", width: 500, height: 500, borderRadius: "50%" }}>
             <div
+              ref={(el) => {
+                els.ring500 = el
+              }}
+              style={RING}
+            />
+            <div
+              ref={(el) => {
+                els.emblem = el
+              }}
               style={{
-                ...center,
+                ...CENTER,
                 position: "relative",
-                width: curW,
-                height: curH,
+                width: CENTER_SIZE,
+                height: CENTER_SIZE,
                 flexShrink: 0,
-                borderRadius: radius,
-                padding: 3 * (1 - ease),
+                borderRadius: RADIUS_VAR,
+                padding: 3,
                 background: "linear-gradient(135deg, #b5ecff, #1a9bff, #006bff)",
-                boxShadow: emblemGlow(fade),
               }}
             >
+              {/* emblem rim glow (own layer, only its opacity animates) */}
+              <div
+                ref={(el) => {
+                  els.emblemGlow = el
+                }}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  borderRadius: RADIUS_VAR,
+                  boxShadow: EMBLEM_GLOW,
+                  pointerEvents: "none",
+                }}
+              />
               <div
                 style={{
-                  ...center,
+                  ...CENTER,
                   position: "relative",
                   width: "100%",
                   height: "100%",
-                  borderRadius: radius,
+                  borderRadius: RADIUS_VAR,
                   // gradient underneath as a fallback while the video loads
                   background: circleGradient,
                 }}
@@ -483,11 +652,14 @@ function HeroCenter({
                     style={{
                       position: "absolute",
                       inset: 0,
-                      borderRadius: radius,
+                      borderRadius: RADIUS_VAR,
                       overflow: "hidden", // clips only the video, not the profile cards
                     }}
                   >
                     <video
+                      ref={(el) => {
+                        els.video = el
+                      }}
                       src={centerVideo}
                       poster={centerImage || undefined}
                       autoPlay
@@ -495,6 +667,8 @@ function HeroCenter({
                       loop
                       playsInline
                       preload="auto"
+                      disablePictureInPicture
+                      disableRemotePlayback
                       style={{
                         width: "100%",
                         height: "100%",
@@ -505,43 +679,47 @@ function HeroCenter({
                   </div>
                 )}
 
-                {PROFILES.map((src, i) => {
-                  const angle = (i * Math.PI) / 4
-                  return (
-                    <div
-                      key={i}
-                      style={{
-                        position: "absolute",
-                        width: 96,
-                        height: 96,
-                        borderRadius: 16,
-                        overflow: "hidden",
-                        border: "4px solid #1f2937",
-                        // white glow (outer layers only; inset layers would be hidden under the image)
-                        boxShadow:
-                          "0 0 8px rgba(255,255,255,0.6), 0 0 25px rgba(255,255,255,0.5), 0 0 60px rgba(255,255,255,0.15)",
-                        opacity: fade,
-                        transition: "transform 0.3s ease-out",
-                        transform: `translate(${expandRadius * Math.cos(angle)}px, ${expandRadius * Math.sin(angle)}px)`,
-                      }}
-                    >
-                      <img
-                        src={src}
-                        alt={`Profile ${i + 1}`}
-                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                      />
-                    </div>
-                  )
-                })}
+                {PROFILES.map((src, i) => (
+                  <div
+                    key={i}
+                    ref={(el) => {
+                      els.cards[i] = el
+                    }}
+                    style={{
+                      position: "absolute",
+                      width: 96,
+                      height: 96,
+                      borderRadius: 16,
+                      overflow: "hidden",
+                      border: "4px solid #1f2937",
+                      // white glow (outer layers only; inset layers would be hidden under the image)
+                      boxShadow: CARD_GLOW,
+                      transition: "transform 0.3s ease-out",
+                      willChange: "transform, opacity",
+                      transform: "translate3d(0px, 0px, 0)",
+                    }}
+                  >
+                    <img
+                      src={src}
+                      alt={`Profile ${i + 1}`}
+                      decoding="async"
+                      draggable={false}
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    />
+                  </div>
+                ))}
 
                 <div
+                  ref={(el) => {
+                    els.textBox = el
+                  }}
                   style={{
-                    ...center,
+                    ...CENTER,
                     flexDirection: "column",
                     position: "relative",
                     zIndex: 20,
                     textAlign: "center",
-                    opacity: scrollY > SCROLL_DISTANCE * 0.5 ? fade : 0,
+                    opacity: 0,
                     transition: "opacity 0.5s",
                   }}
                 >
@@ -558,7 +736,7 @@ function HeroCenter({
       </div>
     </div>
   )
-}
+})
 
 // ---- Hero text, services pill and buttons, right under the center circle ----
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" } as const
@@ -607,6 +785,8 @@ const SERVICES: { label: string; icon: React.ReactNode }[] = [
 
 // Prefixed with .hero-root so they beat the section rule that clears div backgrounds
 const HERO_CSS = `
+.hero-root div{background-color:transparent}
+.hero-root canvas{background:transparent !important}
 .hero-root .hero-services{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:clamp(18px,3vh,28px);padding:clamp(8px,1.2vh,12px) clamp(10px,1.4vw,26px);border-radius:999px;border:2px solid #1a8cff;background:rgba(2,8,23,.75);box-shadow:0 0 10px rgba(26,140,255,.9),0 0 28px rgba(0,107,255,.5),inset 0 0 14px rgba(0,143,255,.35)}
 .hero-root .hero-services-item{display:flex;align-items:center;gap:10px;padding:4px clamp(12px,1.4vw,26px);font-size:clamp(13px,.95vw,18px);font-weight:500;color:#fff;white-space:nowrap}
 .hero-root .hero-services-item + .hero-services-item{border-left:1px solid rgba(198,213,234,.3)}
@@ -624,36 +804,27 @@ const HERO_CSS = `
 }
 `
 
-function HeroContent({ scrollY, shift }: { scrollY: number; shift: number }) {
-  const [scale, setScale] = useState(1)
+const gradText = (bg: string, glow: string): React.CSSProperties => ({
+  background: bg,
+  WebkitBackgroundClip: "text",
+  backgroundClip: "text",
+  WebkitTextFillColor: "transparent",
+  color: "transparent",
+  filter: glow,
+})
 
-  useEffect(() => {
-    const update = () => setScale(Math.min(1, window.innerWidth / 700))
-    update()
-    window.addEventListener("resize", update)
-    return () => window.removeEventListener("resize", update)
-  }, [])
-
-  // visible while the circle is closed; fades as soon as it starts opening (the profile cards fly out underneath)
-  const fade = 1 - Math.min(scrollY / (SCROLL_DISTANCE * 0.4), 1)
-
-  const gradText = (bg: string, glow: string): React.CSSProperties => ({
-    background: bg,
-    WebkitBackgroundClip: "text",
-    backgroundClip: "text",
-    WebkitTextFillColor: "transparent",
-    color: "transparent",
-    filter: glow,
-  })
-
+const HeroContent = memo(function HeroContent({ els }: { els: Els }) {
   return (
     <div
+      ref={(el) => {
+        els.content = el
+      }}
       style={{
         position: "absolute",
         left: 0,
         right: 0,
         // starts at the bottom edge of the (shifted) center circle and runs to the bottom of the hero
-        top: `calc(${(0.5 - shift) * 100}% + ${(CENTER_SIZE / 2) * scale}px)`,
+        top: `calc(${(0.5 - STAGE_SHIFT) * 100}% + ${CENTER_SIZE / 2}px)`,
         bottom: 0,
         zIndex: 20,
         display: "flex",
@@ -663,12 +834,10 @@ function HeroContent({ scrollY, shift }: { scrollY: number; shift: number }) {
         textAlign: "center",
         padding: "clamp(4px, 1vh, 12px) 20px 0",
         fontFamily: "var(--font-montserrat, inherit)", // picks up Montserrat automatically if you load it with that variable
-        opacity: fade,
+        willChange: "opacity, transform",
         pointerEvents: "none",
       }}
     >
-      <style>{HERO_CSS}</style>
-
       {/* headline */}
       <div style={{ position: "relative" }}>
         <h1
@@ -739,7 +908,13 @@ function HeroContent({ scrollY, shift }: { scrollY: number; shift: number }) {
       </div>
 
       {/* buttons */}
-      <div className="hero-cta-row" style={{ pointerEvents: fade > 0.1 ? "auto" : "none" }}>
+      <div
+        ref={(el) => {
+          els.ctaRow = el
+        }}
+        className="hero-cta-row"
+        style={{ pointerEvents: "auto" }}
+      >
         <a href="#contact" className="hero-btn hero-btn-primary">
           Get a Quote
           <svg width="18" height="18" viewBox="0 0 24 24" {...stroke}>
@@ -756,26 +931,7 @@ function HeroContent({ scrollY, shift }: { scrollY: number; shift: number }) {
       </div>
     </div>
   )
-}
-
-// Shifts the 3D scene up on screen (without resizing it) so it lines up with the shifted center circle.
-// `shift` is the same animated value the circle uses, so the orbit and the circle always move together.
-function StageOffset({ shift }: { shift: React.MutableRefObject<number> }) {
-  const { camera, size } = useThree()
-  useFrame(() => {
-    const cam = camera as THREE.PerspectiveCamera
-    cam.setViewOffset(size.width, size.height, 0, size.height * shift.current, size.width, size.height)
-  })
-  useEffect(
-    () => () => {
-      const cam = camera as THREE.PerspectiveCamera
-      cam.clearViewOffset()
-      cam.updateProjectionMatrix()
-    },
-    [camera]
-  )
-  return null
-}
+})
 
 export default function Hero({
   images = DEFAULT_HERO_IMAGES,
@@ -792,50 +948,156 @@ export default function Hero({
   const virtual = useRef(0) // wheel/touch driven "scroll" position, 0..TOTAL_SCROLL
   const expanded = useRef(false) // true once fully zoomed -> page scrolls normally
   const touchStartY = useRef(0)
-  const [visible, setVisible] = useState(true)
-  const [reduced, setReduced] = useState(false)
-  const [count, setCount] = useState(1200)
-  const [scrollY, setScrollY] = useState(0) // virtual px driving the animation
-
   const stage = useRef(STAGE_SHIFT) // smoothed stage shift (fraction of hero height)
-  const [stageShift, setStageShift] = useState(STAGE_SHIFT)
+  const visibleRef = useRef(true)
+  const [els] = useState(createEls)
+
+  // React state only for things that change rarely (never per scroll tick)
+  const [visible, setVisible] = useState(true)
+  const [covered, setCovered] = useState(false) // true when the full-screen video hides the 3D scene
+  const [reduced, setReduced] = useState(false)
+  const [count, setCount] = useState(0)
 
   useEffect(() => {
+    const section = ref.current
+    if (!section) return
+
+    setReduced(window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+    setCount(window.matchMedia("(max-width: 768px)").matches ? 500 : 1500)
+
+    const layout = { scale: 1, vw: 1920, vh: 1080, heroH: 1080 }
+    const last = { shift: NaN, v: NaN, zoom: NaN, open: NaN, fade: NaN, covered: false }
+    let layoutDirty = true
+    let measureDirty = true
     let raf = 0
-    const tick = () => {
+    let lastT = 0
+
+    // ---- reads (only on resize, once per frame) ----
+    const measure = () => {
+      layout.scale = Math.min(1, window.innerWidth / 700)
+      layout.vw = window.innerWidth
+      layout.vh = window.innerHeight
+      layout.heroH = section.clientHeight || window.innerHeight
+      layoutDirty = true
+      if (els.content) {
+        els.content.style.top = `calc(${(0.5 - STAGE_SHIFT) * 100}% + ${(CENTER_SIZE / 2) * layout.scale}px)`
+      }
+    }
+
+    // ---- writes (styles only, no layout reads) ----
+    const apply = () => {
+      const { scale, vw, vh, heroH } = layout
+      const v = virtual.current
+      const shift = stage.current
+
+      if (shift !== last.shift || layoutDirty) {
+        last.shift = shift
+        if (els.centerRoot) els.centerRoot.style.transform = `translateY(${-shift * vh}px)`
+        if (els.content) els.content.style.transform = `translate3d(0, ${(STAGE_SHIFT - shift) * heroH}px, 0)`
+      }
+
+      if (v !== last.v || layoutDirty) {
+        last.v = v
+        const open = Math.min(v / SCROLL_DISTANCE, 1)
+        // 0 -> 1 during the zoom phase (after the circle has fully opened and the hold phase is over)
+        const zoom = Math.min(Math.max((v - SCROLL_DISTANCE - HOLD_DISTANCE) / ZOOM_DISTANCE, 0), 1)
+        // rings, small images and text fade out as the zoom starts
+        const fade = 1 - Math.min(zoom * 3, 1)
+
+        if (zoom !== last.zoom || layoutDirty) {
+          last.zoom = zoom
+          // the circle morphs into a full-screen landscape rectangle (size + corner radius, no scaling)
+          const ease = zoom * zoom * (3 - 2 * zoom)
+          const curW = CENTER_SIZE + (vw / scale + 4 - CENTER_SIZE) * ease
+          const curH = CENTER_SIZE + (vh / scale + 4 - CENTER_SIZE) * ease
+          const radius = (Math.min(curW, curH) / 2) * (1 - ease)
+          if (els.scaleWrap) els.scaleWrap.style.transform = `scale(${scale}) rotateX(${TILT * (1 - zoom)}deg)`
+          const em = els.emblem
+          if (em) {
+            em.style.width = `${curW}px`
+            em.style.height = `${curH}px`
+            em.style.padding = `${3 * (1 - ease)}px`
+            em.style.setProperty("--r", `${radius}px`)
+          }
+        }
+
+        if (fade !== last.fade) {
+          if (els.emblemGlow) els.emblemGlow.style.opacity = String(fade)
+        }
+        if (els.ring600) els.ring600.style.opacity = v > SCROLL_DISTANCE * 0.6 ? String(fade) : "0"
+        if (els.ring500) els.ring500.style.opacity = v > SCROLL_DISTANCE * 0.2 ? String(fade) : "0"
+        if (els.textBox) els.textBox.style.opacity = v > SCROLL_DISTANCE * 0.5 ? String(fade) : "0"
+
+        if (open !== last.open || fade !== last.fade) {
+          const expandRadius = open * 300
+          const cards = els.cards
+          for (let i = 0; i < cards.length; i++) {
+            const c = cards[i]
+            if (!c) continue
+            c.style.transform = `translate3d(${expandRadius * CARD_ANGLES[i].cos}px, ${expandRadius * CARD_ANGLES[i].sin}px, 0)`
+            c.style.opacity = String(fade)
+          }
+        }
+        last.open = open
+        last.fade = fade
+
+        // headline / pill / buttons: visible while the circle is closed, gone as soon as it starts opening
+        const heroFade = 1 - Math.min(v / (SCROLL_DISTANCE * 0.4), 1)
+        if (els.content) els.content.style.opacity = String(heroFade)
+        if (els.ctaRow) els.ctaRow.style.pointerEvents = heroFade > 0.1 ? "auto" : "none"
+
+        // once the video covers the screen the 3D scene is invisible -> stop rendering it
+        const isCovered = v >= TOTAL_SCROLL
+        if (isCovered !== last.covered) {
+          last.covered = isCovered
+          setCovered(isCovered)
+        }
+      }
+      layoutDirty = false
+    }
+
+    const tick = (t: number) => {
+      raf = 0
+      if (measureDirty) {
+        measureDirty = false
+        measure()
+      }
+
+      // smooth the stage shift (frame-rate independent version of the old 0.12-per-frame ease)
+      const dt = lastT ? Math.min(t - lastT, 50) : 16.7
+      lastT = t
       const open = Math.min(virtual.current / SCROLL_DISTANCE, 1)
       const target = STAGE_SHIFT + (STAGE_SHIFT_OPEN - STAGE_SHIFT) * open
       const diff = target - stage.current
       if (Math.abs(diff) > 0.0003) {
-        stage.current = Math.abs(diff) < 0.001 ? target : stage.current + diff * 0.12
-        setStageShift(stage.current)
+        const k = 1 - Math.pow(1 - 0.12, dt / 16.667)
+        stage.current = Math.abs(diff) < 0.001 ? target : stage.current + diff * k
       }
-      raf = requestAnimationFrame(tick)
+
+      apply()
+
+      if (Math.abs(target - stage.current) > 0.0003) schedule()
+      else lastT = 0
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [])
 
-  useEffect(() => {
-    setReduced(window.matchMedia("(prefers-reduced-motion: reduce)").matches)
-    setCount(window.matchMedia("(max-width: 768px)").matches ? 500 : 1500)
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(tick)
+    }
 
-    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting))
-    if (ref.current) io.observe(ref.current)
-
+    // ---- input ----
     window.scrollTo(0, 0)
 
     const update = (v: number) => {
       virtual.current = Math.min(Math.max(v, 0), TOTAL_SCROLL)
-      if (virtual.current >= TOTAL_SCROLL) expanded.current = true
+      if (virtual.current >= TOTAL_SCROLL) setExpanded(true)
       progress.current = Math.min(virtual.current / SCROLL_DISTANCE, 1)
-      setScrollY(virtual.current)
+      schedule()
     }
 
     const onWheel = (e: WheelEvent) => {
       if (expanded.current && e.deltaY < 0 && window.scrollY <= 5) {
         // scrolling back up at the top: play the animation in reverse
-        expanded.current = false
+        setExpanded(false)
         e.preventDefault()
       } else if (!expanded.current) {
         e.preventDefault()
@@ -852,10 +1114,10 @@ export default function Hero({
       const y = e.touches[0].clientY
       const deltaY = touchStartY.current - y
       if (expanded.current && deltaY < -20 && window.scrollY <= 5) {
-        expanded.current = false
-        e.preventDefault()
+        setExpanded(false)
+        if (e.cancelable) e.preventDefault()
       } else if (!expanded.current) {
-        e.preventDefault()
+        if (e.cancelable) e.preventDefault()
         update(virtual.current + deltaY * (deltaY < 0 ? 6 : 4))
         touchStartY.current = y
       }
@@ -865,26 +1127,78 @@ export default function Hero({
       touchStartY.current = 0
     }
 
+    // The blocking (non-passive) wheel/touchmove listeners are only attached while they can actually
+    // be needed: during the hero, or when the page is back at the top. Otherwise normal page
+    // scrolling stays on the fast compositor path with no main-thread wait.
+    let blocking = false
+    const syncBlocking = () => {
+      const need = !expanded.current || window.scrollY <= 5
+      if (need === blocking) return
+      blocking = need
+      if (need) {
+        window.addEventListener("wheel", onWheel, { passive: false })
+        window.addEventListener("touchmove", onTouchMove, { passive: false })
+      } else {
+        window.removeEventListener("wheel", onWheel)
+        window.removeEventListener("touchmove", onTouchMove)
+      }
+    }
+
+    const setExpanded = (val: boolean) => {
+      expanded.current = val
+      syncBlocking()
+    }
+
     // keep the page at the top until the hero has finished
     const onScroll = () => {
       if (!expanded.current) window.scrollTo(0, 0)
+      syncBlocking()
     }
 
-    window.addEventListener("wheel", onWheel, { passive: false })
-    window.addEventListener("touchstart", onTouchStart, { passive: false })
-    window.addEventListener("touchmove", onTouchMove, { passive: false })
-    window.addEventListener("touchend", onTouchEnd)
-    window.addEventListener("scroll", onScroll)
+    const onResize = () => {
+      measureDirty = true
+      schedule()
+    }
+
+    // ---- visibility: pause 3D + video when the hero is off screen / tab hidden ----
+    const syncVideo = () => {
+      const vid = els.video
+      if (!vid) return
+      if (visibleRef.current && !document.hidden) vid.play()?.catch(() => {})
+      else vid.pause()
+    }
+
+    const io = new IntersectionObserver(([e]) => {
+      visibleRef.current = e.isIntersecting
+      setVisible(e.isIntersecting)
+      syncVideo()
+    })
+    io.observe(section)
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true })
+    window.addEventListener("touchend", onTouchEnd, { passive: true })
+    window.addEventListener("scroll", onScroll, { passive: true })
+    window.addEventListener("resize", onResize, { passive: true })
+    document.addEventListener("visibilitychange", syncVideo)
+    syncBlocking()
+
+    // initial layout + first paint of the DOM layer
+    measureDirty = false
+    measure()
+    apply()
 
     return () => {
+      if (raf) cancelAnimationFrame(raf)
       io.disconnect()
       window.removeEventListener("wheel", onWheel)
       window.removeEventListener("touchstart", onTouchStart)
       window.removeEventListener("touchmove", onTouchMove)
       window.removeEventListener("touchend", onTouchEnd)
       window.removeEventListener("scroll", onScroll)
+      window.removeEventListener("resize", onResize)
+      document.removeEventListener("visibilitychange", syncVideo)
     }
-  }, [])
+  }, [els])
 
   return (
     <section
@@ -899,11 +1213,8 @@ export default function Hero({
           "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
       }}
     >
-      {/* stops global CSS from painting opaque backgrounds over the hero */}
-      <style>{`
-        .hero-root div { background-color: transparent; }
-        .hero-root canvas { background: transparent !important; }
-      `}</style>
+      {/* stops global CSS from painting opaque backgrounds over the hero + hero text/button styles */}
+      <style>{HERO_CSS}</style>
 
       {/* bottom blue glow */}
       <div
@@ -920,13 +1231,15 @@ export default function Hero({
       />
 
       <Canvas
-        style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
-        frameloop={visible ? "always" : "never"}
-        dpr={[1, 1.5]}
-        camera={{ position: [-9.3, 5.3, 9.3], fov: 50 }}
-        gl={{ antialias: false, powerPreference: "high-performance", alpha: true }}
-        onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+        style={covered ? CANVAS_STYLE_COVERED : CANVAS_STYLE}
+        frameloop={visible && !covered ? "always" : "never"}
+        dpr={CANVAS_DPR}
+        resize={CANVAS_RESIZE}
+        camera={CANVAS_CAMERA}
+        gl={CANVAS_GL}
+        onCreated={onCanvasCreated}
       >
+        <AdaptiveQuality />
         <StageOffset shift={stage} />
 
         {/* lights for the 3D tile edges */}
@@ -934,11 +1247,13 @@ export default function Hero({
         <directionalLight position={[-10, 12, 10]} intensity={2.2} />
         <pointLight position={[0, 6, 0]} intensity={60} color="#3c6eff" />
 
-        <SafeBoundary name="particles">
-          <Suspense fallback={null}>
-            <HeroParticles count={count} />
-          </Suspense>
-        </SafeBoundary>
+        {count > 0 && (
+          <SafeBoundary name="particles">
+            <Suspense fallback={null}>
+              <HeroParticles count={count} />
+            </Suspense>
+          </SafeBoundary>
+        )}
 
         <SafeBoundary name="images">
           <Suspense fallback={null}>
@@ -957,8 +1272,8 @@ export default function Hero({
         />
       </Canvas>
 
-      <HeroCenter scrollY={scrollY} shift={stageShift} centerImage={centerImage} centerVideo={centerVideo} />
-      <HeroContent scrollY={scrollY} shift={stageShift} />
+      <HeroCenter els={els} centerImage={centerImage} centerVideo={centerVideo} />
+      <HeroContent els={els} />
     </section>
   )
 }

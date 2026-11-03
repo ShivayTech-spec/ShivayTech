@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 
 /* ------------------------------------------------------------------ */
@@ -129,11 +129,9 @@ function createGalaxySound() {
       // light synthetic reverb tail (short + mono = cheap to build, no hitch on first grab)
       const len = Math.floor(ctx.sampleRate * 1.1);
       const imp = ctx.createBuffer(1, len, ctx.sampleRate);
-      for (let ch = 0; ch < 1; ch++) {
-        const d = imp.getChannelData(ch);
-        for (let i = 0; i < len; i++) {
-          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.8);
-        }
+      const d = imp.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.8);
       }
       reverb = ctx.createConvolver();
       reverb.buffer = imp;
@@ -353,6 +351,19 @@ const project = (m: Mat, x: number, y: number, z: number, w: number, h: number):
   return [(cx / cw * 0.5 + 0.5) * w, (1 - (cy / cw * 0.5 + 0.5)) * h];
 };
 
+/** hit area of the galaxy on screen (the "dustbin" drop test + glow ring).
+ *  Computed on demand instead of every frame. */
+const galaxyPoly = (m: Mat, w: number, h: number): Pt[] => {
+  const poly: Pt[] = [];
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    poly.push(project(m, Math.cos(a) * 0.86, 0, Math.sin(a) * 0.86, w, h));
+  }
+  return poly;
+};
+
+type HitInfo = { mvp: Mat | null; w: number; h: number };
+
 /* ------------------------------------------------------------------ */
 /*  Galaxy – a real 3D particle galaxy rendered with raw WebGL         */
 /* ------------------------------------------------------------------ */
@@ -387,7 +398,8 @@ varying float vSeed;
 
 void main() {
   // inner regions orbit a little faster than the outer disc
-  float speed = 1.0 + uDiff * 2.2 * exp(-aR * 5.0);
+  float speed = 1.0;
+  if (uDiff > 0.0) speed += uDiff * 2.2 * exp(-aR * 5.0);
   float ang = aTheta + uSpin * speed;
 
   vec3 p = vec3(cos(ang) * aR, aY, sin(ang) * aR);
@@ -396,19 +408,25 @@ void main() {
   float wa = p.x * 0.825 + p.z * 0.565;
   p.y += uWarp * 0.1 * wa * aR;
 
-  // living, breathing motion
-  p += uJitter * 0.012 * vec3(
-    sin(uTime * 0.7 + aSeed * 91.0),
-    0.5 * sin(uTime * 0.5 + aSeed * 57.0),
-    cos(uTime * 0.6 + aSeed * 33.0)
-  );
+  // living, breathing motion (skipped for sets that don't use it)
+  if (uJitter > 0.0) {
+    p += uJitter * 0.012 * vec3(
+      sin(uTime * 0.7 + aSeed * 91.0),
+      0.5 * sin(uTime * 0.5 + aSeed * 57.0),
+      cos(uTime * 0.6 + aSeed * 33.0)
+    );
+  }
 
   vec4 clip = uMVP * vec4(p, 1.0);
   gl_Position = clip;
 
-  float tw = 1.0 + uTwinkle * sin(uTime * uTwSpeed * (1.5 + aSeed * 4.0) + aSeed * 60.0);
-  // rare bright flares on random stars
-  float fl = pow(max(0.0, sin(uTime * 0.25 + aSeed * 400.0)), 60.0);
+  float tw = 1.0;
+  float fl = 0.0;
+  if (uTwinkle > 0.0) {
+    tw = 1.0 + uTwinkle * sin(uTime * uTwSpeed * (1.5 + aSeed * 4.0) + aSeed * 60.0);
+    // rare bright flares on random stars
+    fl = pow(max(0.0, sin(uTime * 0.25 + aSeed * 400.0)), 60.0);
+  }
 
   float size = aSize * uSizeMul * (1.0 + fl * uTwinkle * 3.0 + uBoost * 0.12);
   float raw = size * uPx / clip.w;
@@ -423,9 +441,13 @@ void main() {
 }
 `;
 
-/* Every sprite fades smoothly to zero before the edge of its quad,
-   so no hard disc / square outlines are ever visible (that was the
-   "lego block" look on the big gas and dust sprites). */
+/* Every sprite fades smoothly to zero before the edge of its quad, so no hard
+   outlines show. "Cloud" sprites (nebulae, dust) get a turbulent fbm texture,
+   each rotated differently, so overlapping sprites build wispy, irregular gas
+   instead of round blobs.
+   PERF: the fbm is pre-baked ONCE into a small tileable texture (uNoise)
+   instead of being recomputed per pixel (3 octaves x 4 hashes with sin())
+   for every pixel of thousands of overlapping big sprites. */
 const FRAG = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -437,30 +459,8 @@ varying float vAlpha;
 varying float vSeed;
 uniform float uSpike;
 uniform float uCloud;
+uniform sampler2D uNoise;
 
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float vnoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-float fbm(vec2 p) {
-  float v = 0.0;
-  float a = 0.5;
-  for (int i = 0; i < 3; i++) {
-    v += a * vnoise(p);
-    p = p * 2.03 + vec2(17.0, 9.0);
-    a *= 0.5;
-  }
-  return v;
-}
-
-/* Every sprite fades smoothly to zero before the edge of its quad, so no hard
-   outlines show. "Cloud" sprites (nebulae, dust) get a turbulent fbm texture,
-   each rotated differently, so overlapping sprites build wispy, irregular gas
-   instead of round blobs. */
 void main() {
   vec2 c = gl_PointCoord - 0.5;
   float d = dot(c, c) * 4.0;
@@ -477,7 +477,7 @@ void main() {
     if (uCloud > 0.5) {
       float ang = vSeed * 6.2831;
       mat2 rot = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
-      float n = fbm(rot * c * 3.4 + vSeed * 41.0);
+      float n = texture2D(uNoise, (rot * c * 3.4 + vSeed * 41.0) * 0.0625).r;
       float body = 1.0 - smoothstep(0.05, 1.0, d);
       f = body * (0.12 + 1.9 * smoothstep(0.25, 0.8, n));
     }
@@ -488,8 +488,60 @@ void main() {
 
 const UNIFORMS = [
   "uMVP", "uTime", "uSpin", "uDiff", "uWarp", "uJitter", "uTwinkle", "uTwSpeed",
-  "uSizeMul", "uPx", "uMaxPt", "uBoost", "uSpike", "uReveal", "uRadial", "uCloud",
+  "uSizeMul", "uPx", "uMaxPt", "uBoost", "uSpike", "uReveal", "uRadial", "uCloud", "uNoise",
 ] as const;
+
+/** Tileable fbm noise baked into a 256x256 texture (covers 16 base cells,
+ *  same 3-octave 0.5/0.25/0.125 recipe as the old per-pixel shader). */
+function makeNoiseTexture(gl: WebGLRenderingContext): WebGLTexture | null {
+  const N = 256;
+  const P = 16;
+  const hash = (x: number, y: number, per: number) => {
+    const xi = ((x % per) + per) % per;
+    const yi = ((y % per) + per) % per;
+    let h = (Math.imul(xi, 374761393) + Math.imul(yi, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  };
+  const vn = (x: number, y: number, per: number) => {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    let fx = x - ix;
+    let fy = y - iy;
+    fx = fx * fx * (3 - 2 * fx);
+    fy = fy * fy * (3 - 2 * fy);
+    const a = hash(ix, iy, per);
+    const b = hash(ix + 1, iy, per);
+    const c = hash(ix, iy + 1, per);
+    const d = hash(ix + 1, iy + 1, per);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+  };
+  const data = new Uint8Array(N * N);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const px = (x / N) * P;
+      const py = (y / N) * P;
+      const v =
+        0.5 * vn(px, py, P) +
+        0.25 * vn(px * 2 + 17, py * 2 + 9, P * 2) +
+        0.125 * vn(px * 4 + 34, py * 4 + 18, P * 4);
+      data[y * N + x] = Math.round(clamp(v) * 255);
+    }
+  }
+  const tex = gl.createTexture();
+  if (!tex) return null;
+  gl.activeTexture(gl.TEXTURE4);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, N, N, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.activeTexture(gl.TEXTURE0);
+  return tex;
+}
 
 type StarSet = {
   buf: WebGLBuffer;
@@ -570,29 +622,53 @@ const hazeColor = (r: number) => {
   return mix([0.2, 0.4, 1], [0.1, 0.7, 1], (r - 0.65) / 0.35);
 };
 
+/** growable typed-array point list (no giant number[] with millions of pushes) */
 class Pts {
-  d: number[] = [];
+  d: Float32Array;
+  n = 0;
+  constructor(cap = 1024) {
+    this.d = new Float32Array(cap * 9);
+  }
   add(r: number, th: number, y: number, size: number, c: number[], a: number) {
-    this.d.push(r, th, y, size, c[0], c[1], c[2], a, Math.random());
+    if (this.n + 9 > this.d.length) {
+      const nd = new Float32Array(this.d.length * 2);
+      nd.set(this.d);
+      this.d = nd;
+    }
+    const d = this.d;
+    const n = this.n;
+    d[n] = r;
+    d[n + 1] = th;
+    d[n + 2] = y;
+    d[n + 3] = size;
+    d[n + 4] = c[0];
+    d[n + 5] = c[1];
+    d[n + 6] = c[2];
+    d[n + 7] = a;
+    d[n + 8] = Math.random();
+    this.n = n + 9;
   }
   get count() {
-    return this.d.length / 9;
+    return this.n / 9;
+  }
+  get data() {
+    return this.d.subarray(0, this.n);
   }
 }
 
-/** k = particle density: 1 = full quality, lower = fewer particles (weaker devices) */
-function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
-  const sets: StarSet[] = [];
+/** k = particle density: 1 = full quality, lower = fewer particles (weaker devices).
+ *  Returns a list of small build steps. The render loop runs them a few
+ *  milliseconds per frame, so generating 150k+ particles never freezes the page.
+ *  Steps run in order, so the draw order of `sets` is identical to before. */
+function buildSteps(gl: WebGLRenderingContext, k: number, sets: StarSet[]): (() => void)[] {
+  const steps: (() => void)[] = [];
   const clumps = makeClumps(k < 1 ? 260 : 520);
   const clump = () => inClump(clumps[(Math.random() * clumps.length) | 0]);
 
-  const finish = (
-    pts: Pts,
-    o: Partial<Omit<StarSet, "buf" | "count">>
-  ) => {
+  const finish = (pts: Pts, o: Partial<Omit<StarSet, "buf" | "count">>) => {
     const buf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts.d), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, pts.data, gl.STATIC_DRAW);
     sets.push({
       buf,
       count: pts.count,
@@ -612,9 +688,9 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
   };
 
   /* 1. far background stars (spin 0 -> only camera parallax moves them) */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(3000 * k);
+    const p = new Pts(n + 8);
     for (let i = 0; i < n; i++) {
       const rr = rand(3.5, 9);
       const phi = Math.acos(rand(-1, 1));
@@ -627,12 +703,12 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       p.add(rxz, th, rr * Math.cos(phi), rand(0.01, 0.026) * (rr / 4), col, a);
     }
     finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.35, radial: 0 });
-  }
+  });
 
   /* 2. faint halo of old stars around the galaxy (gives real depth) */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(3200 * k);
+    const p = new Pts(n + 8);
     for (let i = 0; i < n; i++) {
       const rr = rand(0.12, 1.5) * (0.5 + 0.5 * Math.random());
       const phi = Math.acos(rand(-1, 1));
@@ -647,12 +723,12 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       );
     }
     finish(p, { spin: 0.2, diff: 0, warp: 0, twinkle: 0.2 });
-  }
+  });
 
   /* 3. glowing gas + unresolved starlight (many very faint, very soft sprites
         that melt together into a smooth luminous cloud) */
-  {
-    const p = new Pts();
+  steps.push(() => {
+    const p = new Pts(Math.floor(10000 * k) + 8);
     const n = Math.floor(6500 * k);
     for (let i = 0; i < n; i++) {
       let r: number;
@@ -676,12 +752,12 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       p.add(r, th, gauss() * 0.02, rand(0.1, 0.2), col, rand(0.006, 0.014) * (1 - r * 0.4));
     }
     finish(p, { jitter: 0.5 });
-  }
+  });
 
   /* 3b. colourful emission nebulae – big soft glowing clouds inside the arms */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(420 * k);
+    const p = new Pts(n + 8);
     const pal = [[1, 0.25, 0.5], [0.25, 0.8, 1], [1, 0.5, 0.2], [0.6, 0.3, 1], [1, 0.3, 0.7]];
     for (let i = 0; i < n; i++) {
       const [r, th] = clump();
@@ -689,39 +765,47 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       p.add(r, th, gauss() * 0.015, rand(0.14, 0.34) * (0.6 + 0.6 * r), mix(base, hazeColor(r), 0.25), rand(0.02, 0.045));
     }
     finish(p, { jitter: 0.4, twinkle: 0.05, twSpeed: 0.3, cloud: 1 });
-  }
+  });
 
   /* 4. the main disc: well over a hundred thousand tiny individual stars.
         Mostly very small + faint so they blend into a continuous glow,
-        grouped into clusters so the arms look knotty instead of uniform. */
+        grouped into clusters so the arms look knotty instead of uniform.
+        Built in 4 chunks so no single frame is blocked for long. */
   {
-    const p = new Pts();
-    const n = Math.floor(110000 * k);
-    for (let i = 0; i < n; i++) {
-      let r = 0;
-      let th = 0;
-      if (Math.random() < 0.22) {
-        [r, th] = clump();
-      } else {
-        r = clamp(expR(0.29), 0.01, 1);
-        const onArm = Math.random() < 0.3 + 0.55 * r;
-        th = onArm
-          ? armTheta(pickArm(), r) + gauss() * (0.1 + 0.2 * r)
-          : Math.random() * Math.PI * 2;
-      }
-      const thick = 0.012 + 0.03 * Math.exp(-r * 4);
-      const size = Math.random() < 0.012 ? rand(0.007, 0.011) : rand(0.0022, 0.0048);
-      const a = rand(0.25, 0.8) * (0.4 + 0.6 * Math.min(1, r * 2.2));
-      p.add(r, th, gauss() * thick, size, starColor(r), a);
+    const discN = Math.floor(110000 * k);
+    const disc = new Pts(discN + 8);
+    const CH = 4;
+    for (let c = 0; c < CH; c++) {
+      const from = Math.floor((discN * c) / CH);
+      const to = Math.floor((discN * (c + 1)) / CH);
+      steps.push(() => {
+        for (let i = from; i < to; i++) {
+          let r = 0;
+          let th = 0;
+          if (Math.random() < 0.22) {
+            [r, th] = clump();
+          } else {
+            r = clamp(expR(0.29), 0.01, 1);
+            const onArm = Math.random() < 0.3 + 0.55 * r;
+            th = onArm
+              ? armTheta(pickArm(), r) + gauss() * (0.1 + 0.2 * r)
+              : Math.random() * Math.PI * 2;
+          }
+          const thick = 0.012 + 0.03 * Math.exp(-r * 4);
+          const size = Math.random() < 0.012 ? rand(0.007, 0.011) : rand(0.0022, 0.0048);
+          const a = rand(0.25, 0.8) * (0.4 + 0.6 * Math.min(1, r * 2.2));
+          disc.add(r, th, gauss() * thick, size, starColor(r), a);
+        }
+        if (c === CH - 1) finish(disc, { jitter: 0.35, twinkle: 0.12 });
+      });
     }
-    finish(p, { jitter: 0.35, twinkle: 0.12 });
   }
 
   /* 5. dark dust lanes along the inner edge of the arms – patchy and
         filamentary (alpha-blended, they really hide the stars behind) */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(5200 * k);
+    const p = new Pts(n + 208);
     for (let i = 0; i < n; i++) {
       let r: number;
       let th: number;
@@ -753,37 +837,38 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       );
     }
     finish(p, { additive: false, cloud: 1 });
-  }
+  });
 
   /* 6. pink star-forming knots (HII regions) inside the clusters */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(230 * k);
+    const p = new Pts(n * 2 + 8);
     for (let i = 0; i < n; i++) {
       const [r, th] = clump();
       const y = gauss() * 0.01;
       const col = Math.random() < 0.5 ? [1, 0.35, 0.7] : [1, 0.5, 0.8];
       p.add(r, th, y, rand(0.02, 0.05), col, rand(0.18, 0.4));
-      p.d.push(r, th, y, 0.007, 1, 0.85, 0.95, 0.8, Math.random());
+      p.add(r, th, y, 0.007, [1, 0.85, 0.95], 0.8);
     }
     finish(p, { twinkle: 0.15, twSpeed: 0.5 });
-  }
+  });
 
   /* 6b. young blue giants – bright jewels that glow through the bloom */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(700 * k);
+    const p = new Pts(n + 8);
     for (let i = 0; i < n; i++) {
       const [r, th] = clump();
       p.add(r, th, gauss() * 0.012, rand(0.009, 0.02), mix([0.7, 0.85, 1], [1, 1, 1], Math.random() * 0.6), rand(0.35, 0.9));
     }
     finish(p, { twinkle: 0.3, twSpeed: 0.8 });
-  }
+  });
 
   /* 7. dense warm bulge + a subtle central bar */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(11000 * k);
+    const bar = Math.floor(2400 * k);
+    const p = new Pts(n + bar + 8);
     for (let i = 0; i < n; i++) {
       const r = Math.abs(gauss()) * 0.085;
       p.add(
@@ -795,7 +880,6 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
         rand(0.25, 0.65)
       );
     }
-    const bar = Math.floor(2400 * k);
     for (let i = 0; i < bar; i++) {
       const along = gauss() * 0.11;
       const across = gauss() * 0.035;
@@ -805,22 +889,22 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       p.add(Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.02, rand(0.004, 0.008), mix(WARM, CREAM, 0.5), rand(0.2, 0.5));
     }
     finish(p, { twinkle: 0.1 });
-  }
+  });
 
   /* 8. breathing glow of the galactic core */
-  {
-    const p = new Pts();
+  steps.push(() => {
+    const p = new Pts(8);
     p.add(0, 0, 0, 0.6, [0.95, 0.5, 0.8], 0.04);
     p.add(0, 0, 0, 0.34, [1, 0.72, 0.55], 0.1);
     p.add(0, 0, 0, 0.16, [1, 0.88, 0.72], 0.26);
     p.add(0, 0, 0, 0.06, [1, 1, 1], 0.55);
     finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.1, twSpeed: 0.18 });
-  }
+  });
 
   /* 10. companion dwarf galaxies + globular clusters (fixed in space, so they
          drift with the camera parallax and give the scene real depth) */
-  {
-    const p = new Pts();
+  steps.push(() => {
+    const p = new Pts(8000);
     const cart = (x: number, y: number, z: number, size: number, c: number[], a: number) =>
       p.add(Math.hypot(x, z), Math.atan2(z, x), y, size, c, a);
     const dwarfs: [number, number, number, number][] = [
@@ -862,11 +946,11 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       cart(cx, cy, cz, 0.05, [1, 0.85, 0.65], 0.03);
     }
     finish(p, { spin: 0, diff: 0, warp: 0, twinkle: 0.15, radial: 0 });
-  }
+  });
 
   /* 11. deep field: distant galaxies as tiny elliptical smudges far behind */
-  {
-    const p = new Pts();
+  steps.push(() => {
+    const p = new Pts(256);
     const n = Math.floor(26 * k);
     for (let i = 0; i < n; i++) {
       const rr = rand(4, 8);
@@ -886,12 +970,12 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       }
     }
     finish(p, { spin: 0, diff: 0, warp: 0, radial: 0 });
-  }
+  });
 
   /* 12. drifting space-dust motes near the camera: soft bokeh for depth */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(36 * k);
+    const p = new Pts(n + 8);
     for (let i = 0; i < n; i++) {
       p.add(
         rand(0.25, 1.5),
@@ -903,12 +987,12 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       );
     }
     finish(p, { spin: 0.12, diff: 0, warp: 0, jitter: 1.5, twinkle: 0.25, twSpeed: 0.4, radial: 0 });
-  }
+  });
 
   /* 9. a handful of bright foreground stars with soft diffraction spikes */
-  {
-    const p = new Pts();
+  steps.push(() => {
     const n = Math.floor(40 * k);
+    const p = new Pts(n + 8);
     for (let i = 0; i < n; i++) {
       const r = rand(0.08, 1.2);
       const th = Math.random() * Math.PI * 2;
@@ -916,9 +1000,9 @@ function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
       p.add(r, th, gauss() * 0.12, rand(0.03, 0.055), col, rand(0.3, 0.65));
     }
     finish(p, { spin: 0.3, diff: 0, warp: 0.5, twinkle: 0.35, spike: 1, radial: 0 });
-  }
+  });
 
-  return sets;
+  return steps;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1092,12 +1176,12 @@ function Galaxy({
   progressRef,
   hotRef,
   flashRef,
-  hitPolyRef,
+  hitRef,
 }: {
   progressRef: MutableRefObject<number>;
   hotRef: MutableRefObject<boolean>;
   flashRef: MutableRefObject<number>;
-  hitPolyRef: MutableRefObject<Pt[]>;
+  hitRef: MutableRefObject<HitInfo>;
 }) {
   const glRef = useRef<HTMLCanvasElement>(null);
   const ringRef = useRef<HTMLCanvasElement>(null);
@@ -1146,6 +1230,7 @@ function Galaxy({
     UNIFORMS.forEach((n) => (U[n] = gl.getUniformLocation(starProg, n)));
     const maxPt = (gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array)[1] || 64;
     gl.uniform1f(U.uMaxPt, weak ? Math.min(maxPt, 48) : maxPt);
+    gl.uniform1i(U.uNoise, 4); // baked cloud noise lives on texture unit 4
 
     const BU = brightProg ? uloc(brightProg, ["uTex", "uTexel", "uThresh", "uKnee"]) : {};
     const LU = blurProg ? uloc(blurProg, ["uTex", "uDir"]) : {};
@@ -1167,7 +1252,16 @@ function Galaxy({
     gl.disable(gl.DEPTH_TEST);
     gl.clearColor(0, 0, 0, 0);
 
-    const sets = buildSets(gl, density);
+    /* ---- particles are generated in small slices across frames ---- */
+    const sets: StarSet[] = [];
+    const noise: { tex: WebGLTexture | null } = { tex: null };
+    const steps: (() => void)[] = [
+      () => {
+        noise.tex = makeNoiseTexture(gl);
+      },
+    ].concat(buildSteps(gl, density, sets));
+    let stepIdx = 0;
+    let building = true;
 
     /* ---- render targets for the bloom chain ---- */
     let scene: Target | null = null;
@@ -1254,14 +1348,26 @@ function Galaxy({
     const INTRO = reduced ? 0.01 : 5.5;
     let visible = typeof IntersectionObserver === "undefined";
     let introStart = visible ? performance.now() : -1;
+    let raf = 0;
+    let last = performance.now();
+
+    /** the loop fully stops while the section is off-screen and restarts here */
+    const start = () => {
+      if (!raf) {
+        last = performance.now();
+        raf = requestAnimationFrame(frame);
+      }
+    };
+
     const io =
       typeof IntersectionObserver !== "undefined"
         ? new IntersectionObserver(
             (entries) => {
               for (const e of entries) {
                 visible = e.isIntersecting;
-                if (e.isIntersecting && e.intersectionRatio >= 0.2 && introStart < 0) {
-                  introStart = performance.now();
+                if (e.isIntersecting) {
+                  if (e.intersectionRatio >= 0.2 && introStart < 0) introStart = performance.now();
+                  start();
                 }
               }
             },
@@ -1273,16 +1379,27 @@ function Galaxy({
     /* ---- shooting stars (2D overlay) ---- */
     const shooters: Shooter[] = [];
     let nextShoot = 6;
+    let ringDirty = false;
 
     /* ---- animation loop ---- */
     const STRIDE = 36;
     let t = 0;
     let spinAcc = 0;
     let glow = 0;
-    let last = performance.now();
-    let raf = 0;
     let slow = 0;
     const fov = Math.PI / 4;
+
+    const pump = (budget: number) => {
+      const t0 = performance.now();
+      do {
+        steps[stepIdx++]();
+      } while (stepIdx < steps.length && performance.now() - t0 < budget);
+      if (stepIdx >= steps.length) {
+        building = false;
+        // the intro should play on a finished galaxy, not on an empty sky
+        if (introStart >= 0) introStart = performance.now();
+      }
+    };
 
     const drawSet = (s: StarSet, boost: number) => {
       gl.bindBuffer(gl.ARRAY_BUFFER, s.buf);
@@ -1323,12 +1440,18 @@ function Galaxy({
     };
 
     const frame = (now: number) => {
-      raf = requestAnimationFrame(frame);
+      raf = 0;
+
+      // generate the galaxy a few ms per frame (even while off-screen)
+      if (building) pump(6);
+
       if (!visible) {
         last = now;
         slow = 0;
-        return;
+        if (building) raf = requestAnimationFrame(frame);
+        return; // off-screen and finished: loop stops completely until it scrolls back in
       }
+      raf = requestAnimationFrame(frame);
 
       const ms = now - last;
       if (weak && ms < 28) return; // cap weak devices at ~30fps = steady, no judder
@@ -1352,7 +1475,7 @@ function Galaxy({
       flashRef.current = Math.max(0, flash - dt * 1.8);
 
       /* intro: 0 -> 1 */
-      const it = introStart < 0 ? 0 : clamp((now - introStart) / 1000 / INTRO);
+      const it = introStart < 0 || building ? 0 : clamp((now - introStart) / 1000 / INTRO);
       const reveal = it * it * (3 - 2 * it);
       const intro = 1 - easeOutCubic(it);
 
@@ -1376,6 +1499,12 @@ function Galaxy({
 
       const view = mul(trans(0, 0, -dist), mul(rotZ(roll), mul(rotX(pitch), rotY(yaw))));
       const mvp = mul(persp(fov, aspect, 0.05, 50), view);
+
+      // hand the camera to the drag logic (it builds the hit polygon only when needed)
+      const hi = hitRef.current;
+      hi.mvp = mvp;
+      hi.w = w;
+      hi.h = h;
 
       /* ---------- pass 1: the stars ---------- */
       const sc = scene as Target | null;
@@ -1462,18 +1591,7 @@ function Galaxy({
         gl.activeTexture(gl.TEXTURE0);
       }
 
-      /* hit area of the galaxy on screen (used for the "dustbin" drop test) */
-      const poly: Pt[] = [];
-      for (let i = 0; i < 48; i++) {
-        const a = (i / 48) * Math.PI * 2;
-        poly.push(project(mvp, Math.cos(a) * 0.86, 0, Math.sin(a) * 0.86, w, h));
-      }
-      hitPolyRef.current = poly;
-
-      /* 2D overlay: drop-zone ring + ripple + shooting stars */
-      rctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      rctx.clearRect(0, 0, w, h);
-
+      /* shooting stars spawn */
       if (!reduced && !weak && it > 0.9) {
         nextShoot -= dt;
         if (nextShoot <= 0) {
@@ -1491,73 +1609,90 @@ function Galaxy({
           nextShoot = rand(3.5, 8);
         }
       }
-      for (let i = shooters.length - 1; i >= 0; i--) {
-        const s = shooters[i];
-        s.life += dt;
-        s.x += s.vx * dt;
-        s.y += s.vy * dt;
-        const k = s.life / s.max;
-        if (k >= 1) {
-          shooters.splice(i, 1);
-          continue;
-        }
-        const a = Math.sin(k * Math.PI);
-        const g = rctx.createLinearGradient(s.x - s.vx * 0.14, s.y - s.vy * 0.14, s.x, s.y);
-        g.addColorStop(0, "rgba(160,200,255,0)");
-        g.addColorStop(1, `rgba(235,245,255,${(0.9 * a).toFixed(3)})`);
-        rctx.strokeStyle = g;
-        rctx.lineWidth = 1.6;
-        rctx.lineCap = "round";
-        rctx.beginPath();
-        rctx.moveTo(s.x - s.vx * 0.14, s.y - s.vy * 0.14);
-        rctx.lineTo(s.x, s.y);
-        rctx.stroke();
-        rctx.beginPath();
-        rctx.arc(s.x, s.y, 1.8, 0, Math.PI * 2);
-        rctx.fillStyle = `rgba(255,255,255,${(a).toFixed(3)})`;
-        rctx.shadowColor = "rgba(160,200,255,0.9)";
-        rctx.shadowBlur = weak ? 0 : 10;
-        rctx.fill();
-        rctx.shadowBlur = 0;
-      }
 
-      if (glow > 0.02) {
-        rctx.beginPath();
-        poly.forEach(([x, y], i) => (i ? rctx.lineTo(x, y) : rctx.moveTo(x, y)));
-        rctx.closePath();
-        rctx.fillStyle = `rgba(59,130,246,${0.07 * glow})`;
-        rctx.fill();
-        rctx.strokeStyle = `rgba(110,180,255,${0.35 + 0.6 * glow})`;
-        rctx.lineWidth = 2;
-        rctx.shadowColor = "rgba(59,130,246,0.9)";
-        rctx.shadowBlur = weak ? 0 : 30 * glow;
-        rctx.stroke();
-        rctx.shadowBlur = 0;
+      /* 2D overlay: drop-zone ring + ripple + shooting stars.
+         Only touched when there is something to draw (or to erase). */
+      const wantPoly = glow > 0.02 || flash > 0.01;
+      const anyOverlay = shooters.length > 0 || wantPoly;
+      if (anyOverlay || ringDirty) {
+        rctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        rctx.clearRect(0, 0, w, h);
+
+        for (let i = shooters.length - 1; i >= 0; i--) {
+          const s = shooters[i];
+          s.life += dt;
+          s.x += s.vx * dt;
+          s.y += s.vy * dt;
+          const k = s.life / s.max;
+          if (k >= 1) {
+            shooters.splice(i, 1);
+            continue;
+          }
+          const a = Math.sin(k * Math.PI);
+          const g = rctx.createLinearGradient(s.x - s.vx * 0.14, s.y - s.vy * 0.14, s.x, s.y);
+          g.addColorStop(0, "rgba(160,200,255,0)");
+          g.addColorStop(1, `rgba(235,245,255,${(0.9 * a).toFixed(3)})`);
+          rctx.strokeStyle = g;
+          rctx.lineWidth = 1.6;
+          rctx.lineCap = "round";
+          rctx.beginPath();
+          rctx.moveTo(s.x - s.vx * 0.14, s.y - s.vy * 0.14);
+          rctx.lineTo(s.x, s.y);
+          rctx.stroke();
+          rctx.beginPath();
+          rctx.arc(s.x, s.y, 1.8, 0, Math.PI * 2);
+          rctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+          rctx.shadowColor = "rgba(160,200,255,0.9)";
+          rctx.shadowBlur = weak ? 0 : 10;
+          rctx.fill();
+          rctx.shadowBlur = 0;
+        }
+
+        if (wantPoly) {
+          const poly = galaxyPoly(mvp, w, h);
+
+          if (glow > 0.02) {
+            rctx.beginPath();
+            poly.forEach(([x, y], i) => (i ? rctx.lineTo(x, y) : rctx.moveTo(x, y)));
+            rctx.closePath();
+            rctx.fillStyle = `rgba(59,130,246,${0.07 * glow})`;
+            rctx.fill();
+            rctx.strokeStyle = `rgba(110,180,255,${0.35 + 0.6 * glow})`;
+            rctx.lineWidth = 2;
+            rctx.shadowColor = "rgba(59,130,246,0.9)";
+            rctx.shadowBlur = weak ? 0 : 30 * glow;
+            rctx.stroke();
+            rctx.shadowBlur = 0;
+          }
+          if (flash > 0.01) {
+            const [cx, cy] = project(mvp, 0, 0, 0, w, h);
+            const s = 0.3 + (1 - flash) * 1.0;
+            rctx.beginPath();
+            poly.forEach(([x, y], i) => {
+              const px = cx + (x - cx) * s;
+              const py = cy + (y - cy) * s;
+              if (i) rctx.lineTo(px, py);
+              else rctx.moveTo(px, py);
+            });
+            rctx.closePath();
+            rctx.strokeStyle = `rgba(130,195,255,${(flash * 0.75).toFixed(3)})`;
+            rctx.lineWidth = 2 + flash * 5;
+            rctx.stroke();
+          }
+        }
       }
-      if (flash > 0.01) {
-        const [cx, cy] = project(mvp, 0, 0, 0, w, h);
-        const s = 0.3 + (1 - flash) * 1.0;
-        rctx.beginPath();
-        poly.forEach(([x, y], i) => {
-          const px = cx + (x - cx) * s;
-          const py = cy + (y - cy) * s;
-          if (i) rctx.lineTo(px, py);
-          else rctx.moveTo(px, py);
-        });
-        rctx.closePath();
-        rctx.strokeStyle = `rgba(130,195,255,${(flash * 0.75).toFixed(3)})`;
-        rctx.lineWidth = 2 + flash * 5;
-        rctx.stroke();
-      }
+      ringDirty = anyOverlay;
     };
-    raf = requestAnimationFrame(frame);
+    start();
 
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
       io?.disconnect();
       window.removeEventListener("resize", resize);
       window.removeEventListener("pointermove", onMouse);
       sets.forEach((s) => gl.deleteBuffer(s.buf));
+      if (noise.tex) gl.deleteTexture(noise.tex);
       freeTargets();
       gl.deleteBuffer(quad);
       gl.deleteProgram(starProg);
@@ -1565,7 +1700,7 @@ function Galaxy({
       if (blurProg) gl.deleteProgram(blurProg);
       if (compProg) gl.deleteProgram(compProg);
     };
-  }, [progressRef, hotRef, flashRef, hitPolyRef]);
+  }, [progressRef, hotRef, flashRef, hitRef]);
 
   const fill = {
     position: "absolute" as const,
@@ -1583,37 +1718,111 @@ function Galaxy({
   );
 }
 
-/** memoised so scroll / drag state updates never re-render the galaxy layer */
+/** memoised so UI state updates never re-render the galaxy layer */
 const GalaxyLayer = memo(Galaxy);
 
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
+/*                                                                     */
+/*  PERF: card positions, scroll progress and drag offsets live in     */
+/*  refs and are written straight to the DOM (transform / opacity).    */
+/*  React state is only used for things that really change the markup  */
+/*  (hint text, mute icon, mobile layout), so scrolling and dragging   */
+/*  no longer re-render the whole component every frame.               */
 /* ------------------------------------------------------------------ */
+const SHADOW_IDLE = "0 0 22px rgba(37,99,235,0.55), inset 0 0 12px rgba(37,99,235,0.2)";
+const SHADOW_DRAG = "0 0 38px rgba(59,130,246,0.95), inset 0 0 18px rgba(59,130,246,0.35)";
+const CARD_TRANSITION = "transform 0.45s cubic-bezier(.2,.8,.2,1), opacity 0.45s";
+
+type DragState = { id: number; sx: number; sy: number; ox: number; oy: number; cx: number; cy: number };
+
 export default function Testimonials() {
   const sectionRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLDivElement>(null);
+  const cardEls = useRef<(HTMLDivElement | null)[]>([]);
+  const lastTransform = useRef<string[]>([]);
 
   const progressRef = useRef(0);
   const hotRef = useRef(false);
   const flashRef = useRef(0);
-  const hitPolyRef = useRef<Pt[]>([]);
+  const hitRef = useRef<HitInfo>({ mvp: null, w: 0, h: 0 });
 
-  const [p, setP] = useState(0);
+  const sizeRef = useRef({ w: 1200, h: 800 });
+  const mobileRef = useRef(false);
+  const offsetsRef = useRef<Record<number, { x: number; y: number }>>({});
+  const dismissedRef = useRef<Set<number>>(new Set());
+  const draggingRef = useRef<number | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const dragRaf = useRef(0);
+
   const [near, setNear] = useState(false);
-  const [size, setSize] = useState({ w: 1200, h: 800 });
-  const [offsets, setOffsets] = useState<Record<number, { x: number; y: number }>>({});
-  const [dismissed, setDismissed] = useState<number[]>([]);
-  const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [mobile, setMobile] = useState(false);
+  const [early, setEarly] = useState(true); // p < 0.08 -> "scroll down" hint
+  const [dismissedCount, setDismissedCount] = useState(0);
   const [hot, setHot] = useState(false);
   const [muted, setMuted] = useState(false);
 
   const [sound] = useState(createGalaxySound);
 
-  const dragRef = useRef<{ id: number; sx: number; sy: number; ox: number; oy: number } | null>(null);
-
-  const mobile = size.w < 700;
   const cardW = mobile ? 220 : 290;
-  const galaxyR = Math.min(size.w, size.h) * 0.34;
+
+  /* ---- geometry helpers (all ref based, so they never go stale) ---- */
+  const basePos = useCallback((r: Review) => {
+    const { w, h } = sizeRef.current;
+    const e = cardEase(r.id, progressRef.current);
+    const fx = mobileRef.current ? r.mx : r.fx;
+    const fy = mobileRef.current ? r.my : r.fy;
+    return { x: fx * w * e, y: fy * h * e, e };
+  }, []);
+
+  const isInteractive = useCallback(
+    (r: Review) => !dismissedRef.current.has(r.id) && cardEase(r.id, progressRef.current) > 0.95,
+    []
+  );
+
+  /** is a point (stage coordinates) over the 3D galaxy disc? */
+  const inGalaxy = useCallback((cx: number, cy: number) => {
+    const hi = hitRef.current;
+    if (hi.mvp) return pointInPoly(cx, cy, galaxyPoly(hi.mvp, hi.w, hi.h));
+    const { w, h } = sizeRef.current;
+    return Math.hypot(cx - w / 2, cy - h / 2) < Math.min(w, h) * 0.34 * 0.9;
+  }, []);
+
+  /** write one card's position / look straight to the DOM */
+  const applyCard = useCallback(
+    (r: Review) => {
+      const el = cardEls.current[r.id];
+      if (!el) return;
+      const b = basePos(r);
+      const isDismissed = dismissedRef.current.has(r.id);
+      const off = offsetsRef.current[r.id];
+      const isDragging = draggingRef.current === r.id;
+
+      const x = isDismissed ? 0 : b.x + (off ? off.x : 0);
+      const y = isDismissed ? 0 : b.y + (off ? off.y : 0);
+      const scale = isDismissed ? 0 : 0.15 + 0.85 * b.e;
+      const rot = (1 - b.e) * (r.id % 2 ? -540 : 540) + r.tilt * b.e;
+
+      const tf = `translate3d(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px), 0) scale(${(isDragging ? scale * 1.05 : scale).toFixed(4)}) rotate(${rot.toFixed(2)}deg)`;
+      if (lastTransform.current[r.id] !== tf) {
+        lastTransform.current[r.id] = tf;
+        el.style.transform = tf;
+        el.style.opacity = (isDismissed ? 0 : b.e).toFixed(3);
+      }
+      const interactive = !isDismissed && b.e > 0.95;
+      el.style.pointerEvents = interactive ? "auto" : "none";
+      el.style.cursor = isDragging ? "grabbing" : "grab";
+      el.style.zIndex = isDragging ? "50" : "10";
+      el.style.transition = isDragging ? "none" : CARD_TRANSITION;
+      el.style.boxShadow = isDragging ? SHADOW_DRAG : SHADOW_IDLE;
+    },
+    [basePos]
+  );
+
+  const applyAll = useCallback(() => {
+    REVIEWS.forEach(applyCard);
+  }, [applyCard]);
 
   /* ---- only create the galaxy (WebGL context + 100k particles) when the
           section is about to scroll into view, so page load stays fast ---- */
@@ -1653,7 +1862,7 @@ export default function Testimonials() {
     if (!next) sound.unlock();
   };
 
-  /* ---- scroll progress ---- */
+  /* ---- scroll progress (no React re-render, DOM written directly) ---- */
   useEffect(() => {
     let raf = 0;
     const update = () => {
@@ -1661,12 +1870,24 @@ export default function Testimonials() {
       const el = sectionRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const total = el.offsetHeight - window.innerHeight;
+      const total = rect.height - window.innerHeight;
       const v = total > 0 ? clamp(-rect.top / total) : 0;
       const prev = progressRef.current;
       progressRef.current = v;
-      // skip tiny changes so React doesn't re-render for sub-pixel scroll
-      if (Math.abs(v - prev) > 0.0005 || v === 0 || v === 1) setP(v);
+      // skip tiny changes so we don't touch the DOM for sub-pixel scroll
+      if (Math.abs(v - prev) <= 0.0005 && v !== 0 && v !== 1) return;
+
+      setEarly(v < 0.08); // no-op unless the value actually flips
+
+      // back at the start: everything returns to the galaxy
+      if (v < 0.01 && (dismissedRef.current.size > 0 || Object.keys(offsetsRef.current).length > 0)) {
+        dismissedRef.current = new Set();
+        offsetsRef.current = {};
+        setDismissedCount(0);
+      }
+
+      if (headingRef.current) headingRef.current.style.opacity = clamp(0.35 + v * 2).toFixed(3);
+      applyAll();
     };
     const onScroll = () => {
       if (!raf) raf = requestAnimationFrame(update);
@@ -1679,61 +1900,69 @@ export default function Testimonials() {
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
     };
-  }, []);
+  }, [applyAll]);
 
   /* ---- stage size ---- */
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
-    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    const measure = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      sizeRef.current = { w, h };
+      const m = w < 700;
+      mobileRef.current = m;
+      setMobile(m); // no-op unless it flips
+      applyAll();
+    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
+  }, [applyAll]);
+
+  useEffect(() => {
+    return () => {
+      if (dragRaf.current) cancelAnimationFrame(dragRaf.current);
+    };
   }, []);
 
-  /* ---- back at the start: everything returns to the galaxy ---- */
-  useEffect(() => {
-    if (p < 0.01 && (dismissed.length > 0 || Object.keys(offsets).length > 0)) {
-      setDismissed([]);
-      setOffsets({});
-    }
-  }, [p, dismissed.length, offsets]);
-
-  /* ---- geometry helpers ---- */
-  const basePos = (r: Review) => {
-    const e = cardEase(r.id, p);
-    const fx = mobile ? r.mx : r.fx;
-    const fy = mobile ? r.my : r.fy;
-    return { x: fx * size.w * e, y: fy * size.h * e, e };
-  };
-
-  /** is a point (stage coordinates) over the 3D galaxy disc? */
-  const inGalaxy = (cx: number, cy: number) => {
-    const poly = hitPolyRef.current;
-    if (poly.length >= 3) return pointInPoly(cx, cy, poly);
-    return Math.hypot(cx - size.w / 2, cy - size.h / 2) < galaxyR * 0.9;
-  };
-
   /* ---- drag handlers ---- */
+  const processDrag = useCallback(() => {
+    dragRaf.current = 0;
+    const d = dragRef.current;
+    if (!d) return;
+    const r = REVIEWS[d.id];
+    const off = { x: d.ox + (d.cx - d.sx), y: d.oy + (d.cy - d.sy) };
+    offsetsRef.current[r.id] = off;
+
+    const { w, h } = sizeRef.current;
+    const b = basePos(r);
+    const over = inGalaxy(w / 2 + b.x + off.x, h / 2 + b.y + off.y);
+    if (over !== hotRef.current) {
+      hotRef.current = over;
+      setHot(over);
+    }
+    applyCard(r);
+  }, [basePos, inGalaxy, applyCard]);
+
   const onDown = (e: ReactPointerEvent<HTMLDivElement>, r: Review) => {
+    if (!isInteractive(r)) return;
     sound.unlock(); // browsers only allow audio after a user gesture
     e.currentTarget.setPointerCapture(e.pointerId);
-    const o = offsets[r.id] ?? { x: 0, y: 0 };
-    dragRef.current = { id: r.id, sx: e.clientX, sy: e.clientY, ox: o.x, oy: o.y };
-    setDraggingId(r.id);
+    const o = offsetsRef.current[r.id] ?? { x: 0, y: 0 };
+    dragRef.current = { id: r.id, sx: e.clientX, sy: e.clientY, ox: o.x, oy: o.y, cx: e.clientX, cy: e.clientY };
+    draggingRef.current = r.id;
+    applyCard(r);
   };
 
   const onMove = (e: ReactPointerEvent<HTMLDivElement>, r: Review) => {
     const d = dragRef.current;
     if (!d || d.id !== r.id) return;
-    const off = { x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) };
-    setOffsets((prev) => ({ ...prev, [r.id]: off }));
-
-    const b = basePos(r);
-    const over = inGalaxy(size.w / 2 + b.x + off.x, size.h / 2 + b.y + off.y);
-    hotRef.current = over;
-    setHot(over);
+    d.cx = e.clientX;
+    d.cy = e.clientY;
+    // coalesce high-frequency pointer events into one update per frame
+    if (!dragRaf.current) dragRaf.current = requestAnimationFrame(processDrag);
   };
 
   const onUp = (e: ReactPointerEvent<HTMLDivElement>, r: Review) => {
@@ -1742,16 +1971,24 @@ export default function Testimonials() {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
+    if (dragRaf.current) {
+      cancelAnimationFrame(dragRaf.current);
+      dragRaf.current = 0;
+    }
+    processDrag(); // settle on the final pointer position
+
     if (hotRef.current) {
       // swallowed by the galaxy – hidden until the user scrolls back to the top
-      setDismissed((prev) => (prev.includes(r.id) ? prev : [...prev, r.id]));
+      dismissedRef.current.add(r.id);
+      setDismissedCount(dismissedRef.current.size);
       flashRef.current = 1;
       sound.swallow(); // 🔊 warp whoosh + bloop + sub thump + chime
     }
     dragRef.current = null;
+    draggingRef.current = null;
     hotRef.current = false;
     setHot(false);
-    setDraggingId(null);
+    applyCard(r);
   };
 
   /* ---- render ---- */
@@ -1780,7 +2017,7 @@ export default function Testimonials() {
             progressRef={progressRef}
             hotRef={hotRef}
             flashRef={flashRef}
-            hitPolyRef={hitPolyRef}
+            hitRef={hitRef}
           />
         )}
 
@@ -1822,8 +2059,9 @@ export default function Testimonials() {
           </svg>
         </button>
 
-        {/* heading */}
+        {/* heading (opacity is driven from the scroll handler) */}
         <div
+          ref={headingRef}
           style={{
             position: "absolute",
             top: mobile ? "5%" : "7%",
@@ -1832,7 +2070,7 @@ export default function Testimonials() {
             textAlign: "center",
             zIndex: 3,
             pointerEvents: "none",
-            opacity: clamp(0.35 + p * 2),
+            opacity: 0.35,
             padding: "0 16px",
             willChange: "opacity",
           }}
@@ -1861,86 +2099,73 @@ export default function Testimonials() {
           </h2>
         </div>
 
-        {/* review cards */}
-        {REVIEWS.map((r) => {
-          const b = basePos(r);
-          const isDismissed = dismissed.includes(r.id);
-          const off = offsets[r.id] ?? { x: 0, y: 0 };
-          const isDragging = draggingId === r.id;
-
-          const x = isDismissed ? 0 : b.x + off.x;
-          const y = isDismissed ? 0 : b.y + off.y;
-          const scale = isDismissed ? 0 : 0.15 + 0.85 * b.e;
-          const opacity = isDismissed ? 0 : b.e;
-          const rot = (1 - b.e) * (r.id % 2 ? -540 : 540) + r.tilt * b.e;
-          const interactive = !isDismissed && b.e > 0.95;
-
-          return (
-            <div
-              key={r.id}
-              onPointerDown={interactive ? (e) => onDown(e, r) : undefined}
-              onPointerMove={(e) => onMove(e, r)}
-              onPointerUp={(e) => onUp(e, r)}
-              onPointerCancel={(e) => onUp(e, r)}
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: "50%",
-                width: cardW,
-                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${isDragging ? scale * 1.05 : scale}) rotate(${rot}deg)`,
-                opacity,
-                transition: isDragging
-                  ? "none"
-                  : "transform 0.45s cubic-bezier(.2,.8,.2,1), opacity 0.45s",
-                zIndex: isDragging ? 50 : 10,
-                pointerEvents: interactive ? "auto" : "none",
-                cursor: isDragging ? "grabbing" : "grab",
-                touchAction: "none",
-                userSelect: "none",
-                padding: mobile ? 14 : 18,
-                borderRadius: 18,
-                // no backdrop-filter: re-blurring the animating galaxy behind every card
-                // every frame is a big cost on low-end GPUs. A denser tint looks the same.
-                background: "rgba(4, 10, 32, 0.82)",
-                border: "1px solid rgba(59,130,246,0.75)",
-                boxShadow: isDragging
-                  ? "0 0 38px rgba(59,130,246,0.95), inset 0 0 18px rgba(59,130,246,0.35)"
-                  : "0 0 22px rgba(37,99,235,0.55), inset 0 0 12px rgba(37,99,235,0.2)",
-                color: "#e6efff",
-                willChange: "transform, opacity",
-              }}
-            >
-              <div style={{ color: "#fbbf24", fontSize: 15, letterSpacing: 2, marginBottom: 8 }}>
-                {"★".repeat(r.rating)}
-                <span style={{ color: "#334155" }}>{"★".repeat(5 - r.rating)}</span>
+        {/* review cards – transform / opacity / shadow / z-index / cursor are
+            written imperatively by applyCard(); the values below are only the
+            constant starting state and React never overwrites them */}
+        {REVIEWS.map((r) => (
+          <div
+            key={r.id}
+            ref={(el) => {
+              cardEls.current[r.id] = el;
+            }}
+            onPointerDown={(e) => onDown(e, r)}
+            onPointerMove={(e) => onMove(e, r)}
+            onPointerUp={(e) => onUp(e, r)}
+            onPointerCancel={(e) => onUp(e, r)}
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: "50%",
+              width: cardW,
+              transform: "translate3d(-50%, -50%, 0) scale(0.15)",
+              opacity: 0,
+              transition: CARD_TRANSITION,
+              zIndex: 10,
+              pointerEvents: "none",
+              cursor: "grab",
+              touchAction: "none",
+              userSelect: "none",
+              padding: mobile ? 14 : 18,
+              borderRadius: 18,
+              // no backdrop-filter: re-blurring the animating galaxy behind every card
+              // every frame is a big cost on low-end GPUs. A denser tint looks the same.
+              background: "rgba(4, 10, 32, 0.82)",
+              border: "1px solid rgba(59,130,246,0.75)",
+              boxShadow: SHADOW_IDLE,
+              color: "#e6efff",
+              willChange: "transform, opacity",
+            }}
+          >
+            <div style={{ color: "#fbbf24", fontSize: 15, letterSpacing: 2, marginBottom: 8 }}>
+              {"★".repeat(r.rating)}
+              <span style={{ color: "#334155" }}>{"★".repeat(5 - r.rating)}</span>
+            </div>
+            <p style={{ margin: 0, fontSize: mobile ? 13 : 14.5, lineHeight: 1.55 }}>
+              “{r.text}”
+            </p>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+              <div
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: "50%",
+                  display: "grid",
+                  placeItems: "center",
+                  fontWeight: 700,
+                  color: "#fff",
+                  background: "linear-gradient(135deg,#2563eb,#7c3aed)",
+                  boxShadow: "0 0 12px rgba(59,130,246,0.8)",
+                }}
+              >
+                {r.name.charAt(0)}
               </div>
-              <p style={{ margin: 0, fontSize: mobile ? 13 : 14.5, lineHeight: 1.55 }}>
-                “{r.text}”
-              </p>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
-                <div
-                  style={{
-                    width: 38,
-                    height: 38,
-                    borderRadius: "50%",
-                    display: "grid",
-                    placeItems: "center",
-                    fontWeight: 700,
-                    color: "#fff",
-                    background: "linear-gradient(135deg,#2563eb,#7c3aed)",
-                    boxShadow: "0 0 12px rgba(59,130,246,0.8)",
-                  }}
-                >
-                  {r.name.charAt(0)}
-                </div>
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{r.name}</div>
-                  <div style={{ fontSize: 12, color: "#93b4ff" }}>{r.role}</div>
-                </div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{r.name}</div>
+                <div style={{ fontSize: 12, color: "#93b4ff" }}>{r.role}</div>
               </div>
             </div>
-          );
-        })}
+          </div>
+        ))}
 
         {/* hints */}
         <div
@@ -1957,10 +2182,10 @@ export default function Testimonials() {
             padding: "0 16px",
           }}
         >
-          {p < 0.08
+          {early
             ? "↓ Scroll down to release the reviews from the galaxy"
-            : dismissed.length > 0
-            ? `${dismissed.length} review${dismissed.length > 1 ? "s" : ""} swallowed – scroll back to the top to bring them back`
+            : dismissedCount > 0
+            ? `${dismissedCount} review${dismissedCount > 1 ? "s" : ""} swallowed – scroll back to the top to bring them back`
             : hot
             ? "Release to feed it to the galaxy"
             : "Drag a review into the galaxy to dismiss it • Scroll up to send them all back"}

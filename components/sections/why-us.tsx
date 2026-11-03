@@ -7,19 +7,20 @@
  * Install:  npm i react-pageflip
  * Images:   put project screenshots in /public/images/  (names are in REASONS below)
  *
- * v10 (this version)
- *  - LAPTOPS: every laptop now shows its screen (browser / code editor / dashboard, tinted with the
- *             person's colour), with bezel, webcam, glare, a metal lip and a glow on the table
- *  - TABLE:   recoloured to the site theme (deep navy glass, electric-blue neon rim, icy highlights)
- *  - SPEED:   no SVG blur filters anywhere in the scene (they were re-rendered every frame),
- *             keyboard is one pattern instead of ~130 rects, only the active person animates,
- *             no backdrop-filter / drop-shadow filter on the book, fewer animated stars,
- *             automatic "lite" mode on weak devices, polling stops when the section is off-screen
- *  - everything else from v9 is kept (book, flip controller, glowing star, people, animations)
+ * v11 (performance pass, every feature of v10 is kept)
+ *  - SCENE:   the table/star and each person now live in their OWN <svg> layer. Before, one animated
+ *             person repainted the whole 6-person scene every frame. Now only that person's layer repaints.
+ *  - STATIC:  table art, defs, stars, book and pages are memoised, so scrolling never re-renders them
+ *  - FLIP:    the book is driven by events (state change + target change) instead of a 90ms poll;
+ *             a slow 250ms safety tick remains so it can never get stuck
+ *  - SCROLL:  no layout reads while the section is off-screen, one rAF per frame, state only on change
+ *  - STARS:   static stars are one SVG, only the twinkling ones are DOM nodes
+ *  - RESIZE:  mobile address-bar height jitter no longer rebuilds the book
+ *  - CSS:     pause list is explicit (no universal selector), lite mode also drops the blurred screenshot backdrop
  */
 
 import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement } from "react";
+import type { CSSProperties, ReactElement } from "react";
 import HTMLFlipBook from "react-pageflip";
 
 /* ───────────────────────── CONTENT (edit freely) ───────────────────────── */
@@ -173,10 +174,11 @@ const TABLE_R = 255;
 const ANGLES = [30, 90, 150, 210, 270, 330];
 const ROMAN = ["I", "II", "III", "IV", "V", "VI"];
 const STAR_D = "M0,-46 C5,-14 14,-5 46,0 C14,5 5,14 0,46 C-5,14 -14,5 -46,0 C-14,-5 -5,-14 0,-46Z";
+const EMPTY_STYLE: CSSProperties = {};
 
 /* ───────────────────────── SMALL PIECES ───────────────────────── */
 
-function Star({ size = 40 }: { size?: number }) {
+const Star = memo(function Star({ size = 40 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="-50 -50 100 100" aria-hidden="true">
       <defs>
@@ -188,14 +190,14 @@ function Star({ size = 40 }: { size?: number }) {
       <path d={STAR_D} fill="url(#wwuStarG)" />
     </svg>
   );
-}
+});
 
 /**
  * Browser-style screenshot frame.
  * The whole image is always visible (object-fit: contain). A blurred copy of the same
  * image fills the empty space, so wide, tall or square screenshots all look right.
  */
-function Shot({ src, name }: { src: string; name: string }) {
+const Shot = memo(function Shot({ src, name }: { src: string; name: string }) {
   const [ok, setOk] = useState(true);
   const fg = useRef<HTMLImageElement | null>(null);
 
@@ -236,7 +238,7 @@ function Shot({ src, name }: { src: string; name: string }) {
       </div>
     </div>
   );
-}
+});
 
 /* ───────────────────────── BOOK COVER (hard-cover art) ───────────────────────── */
 
@@ -254,6 +256,12 @@ const BK_STARS = (() => {
 
 const BK_STAR = "M0,-46 C5,-14 14,-5 46,0 C14,5 5,14 0,46 C-5,14 -14,5 -46,0 C-14,-5 -5,-14 0,-46Z";
 const BK_CORNER = "M0 0 H46 L38 8 H10 V36 L0 46 Z";
+const BK_CORNERS = [
+  "translate(34 10)",
+  "translate(292 10) scale(-1 1)",
+  "translate(34 410) scale(1 -1)",
+  "translate(292 410) scale(-1 -1)",
+];
 
 /** Hard-cover book art (front or back), drawn like the ShivayTech reference book. */
 const BookCover = memo(function BookCover({ kind }: { kind: "front" | "back" }) {
@@ -327,12 +335,7 @@ const BookCover = memo(function BookCover({ kind }: { kind: "front" | "back" }) 
         />
 
         {/* silver corner brackets */}
-        {[
-          "translate(34 10)",
-          "translate(292 10) scale(-1 1)",
-          "translate(34 410) scale(1 -1)",
-          "translate(292 410) scale(-1 -1)",
-        ].map((t, i) => (
+        {BK_CORNERS.map((t, i) => (
           <g key={i} transform={t}>
             <path d={BK_CORNER} fill={`url(#${id}Ag)`} stroke="#1a2236" strokeWidth="0.6" />
             <path d="M 3 3 H 38" stroke="#fff" strokeOpacity="0.5" strokeWidth="0.8" />
@@ -520,8 +523,8 @@ const PERSON_CSS = `
 @media (prefers-reduced-motion:reduce){.wwu-person.on .wwu-eyes{animation:none}}
 `;
 
-/** Shared gradients and patterns. Rendered once inside the scene's <defs>. NO filters on purpose. */
-function PersonDefs() {
+/** Shared gradients and patterns. Rendered once inside the table svg's <defs>. NO filters on purpose. */
+const PersonDefs = memo(function PersonDefs() {
   return (
     <>
       <style>{PERSON_CSS}</style>
@@ -579,7 +582,7 @@ function PersonDefs() {
       </pattern>
     </>
   );
-}
+});
 
 /** A shape with base colour + edge shadow + light, so flat fills look volumetric. */
 function Shaded({
@@ -1455,6 +1458,151 @@ const PersonM = memo(Person);
 
 /* @@PERSON_END */
 
+/* ───────────────────────── SCENE LAYERS ───────────────────────── */
+
+/**
+ * Static table + centre star + shared <defs>. Memoised: it never re-renders after the first paint.
+ * (Only the star pulse and the dashed ring animate, and they repaint just this small layer.)
+ */
+const TableArt = memo(function TableArt() {
+  return (
+    <svg className="wwu-svg" viewBox={`0 0 ${VB} ${VB}`} role="img" aria-label="Six team members sitting around a table">
+      <defs>
+        {/* table: deep navy glass that matches the site (navy night, electric-blue neon, icy white) */}
+        <radialGradient id="wwuTable" cx="50%" cy="42%" r="62%">
+          <stop offset="0" stopColor="#0d2f8f" />
+          <stop offset="0.55" stopColor="#061a52" />
+          <stop offset="1" stopColor="#020a24" />
+        </radialGradient>
+        {/* neon glow around the rim, drawn as a gradient (no blur filter) */}
+        <radialGradient id="wwuTableGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0.72" stopColor="#2f6bff" stopOpacity="0" />
+          <stop offset="0.79" stopColor="#3b8bff" stopOpacity="0.5" />
+          <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
+        </radialGradient>
+        <radialGradient id="wwuHalo">
+          <stop offset="0" stopColor="#3b82ff" stopOpacity="0.55" />
+          <stop offset="1" stopColor="#3b82ff" stopOpacity="0" />
+        </radialGradient>
+
+        {/* centre star: core gradient + auras (no blur filters) */}
+        <radialGradient id="wwuCoreG" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stopColor="#ffffff" />
+          <stop offset="0.35" stopColor="#bcd8ff" />
+          <stop offset="1" stopColor="#2f6bff" />
+        </radialGradient>
+        <radialGradient id="wwuStarAura">
+          <stop offset="0" stopColor="#4f8bff" stopOpacity="0.55" />
+          <stop offset="0.5" stopColor="#2f6bff" stopOpacity="0.18" />
+          <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
+        </radialGradient>
+        <radialGradient id="wwuStarAura2">
+          <stop offset="0" stopColor="#cfe2ff" stopOpacity="0.8" />
+          <stop offset="0.4" stopColor="#4f8bff" stopOpacity="0.4" />
+          <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
+        </radialGradient>
+
+        <PersonDefs />
+      </defs>
+
+      {/* table */}
+      <circle cx={500} cy={500} r={TABLE_R + 70} fill="url(#wwuTableGlow)" />
+      <circle cx={500} cy={500} r={TABLE_R} fill="url(#wwuTable)" stroke="#3b8bff" strokeWidth={3} />
+      <circle cx={500} cy={500} r={TABLE_R - 2} fill="none" stroke="#9cc4ff" strokeOpacity={0.4} strokeWidth={1} />
+      <circle cx={500} cy={500} r={TABLE_R - 34} fill="none" stroke="#4f8bff" strokeOpacity={0.28} strokeWidth={1.5} />
+      <circle cx={500} cy={500} r={TABLE_R - 70} fill="none" stroke="#9cc4ff" strokeOpacity={0.18} strokeWidth={1} strokeDasharray="2 8" />
+      {/* glass reflection */}
+      <ellipse cx={420} cy={372} rx={150} ry={52} transform="rotate(-28 420 372)" fill="#fff" opacity={0.045} />
+
+      {/* centre star: glow, shadow, pulse and a slow rotating ring */}
+      <g transform="translate(500 500)">
+        <circle r={175} fill="url(#wwuStarAura)" />
+        <circle className="wwu-ring" r={96} fill="none" stroke="#7fb0ff" strokeOpacity={0.35} strokeWidth={1.2} strokeDasharray="2 9" />
+        <g className="wwu-starfx">
+          <circle r={84} fill="url(#wwuStarAura2)" />
+          <path d={STAR_D} fill="#2f6bff" opacity={0.16} transform="scale(2.4)" />
+          <path d={STAR_D} fill="#4f8bff" opacity={0.3} transform="scale(2.0)" />
+          <path d={STAR_D} fill="url(#wwuCoreG)" transform="scale(1.6)" />
+          <path d={STAR_D} fill="#fff" opacity={0.9} transform="scale(0.5)" />
+        </g>
+      </g>
+    </svg>
+  );
+});
+
+/**
+ * One person = one svg layer stacked over the table.
+ * The active person's layer is promoted to its own compositor layer, so typing / nodding / blinking
+ * repaints only this person, never the table or the other five.
+ */
+const PersonLayer = memo(function PersonLayer({
+  look,
+  index,
+  on,
+  all,
+}: {
+  look: Look;
+  index: number;
+  on: boolean;
+  all: boolean;
+}) {
+  return (
+    <svg className={`wwu-svg wwu-psvg ${on ? "hot" : ""}`} viewBox={`0 0 ${VB} ${VB}`} aria-hidden="true">
+      <g transform={`rotate(${ANGLES[index]} 500 500) translate(500 ${500 - SEAT_R})`}>
+        <g className={`wwu-person ${on ? "on" : ""} ${all ? "all" : ""}`}>
+          <PersonM look={look} />
+        </g>
+      </g>
+    </svg>
+  );
+});
+
+/** Backdrop stars: static ones are ONE svg, only every 3rd star (the twinkling ones) is a DOM node. */
+const Stars = memo(function Stars() {
+  const stars = useMemo(() => {
+    let s = 11;
+    const rnd = () => {
+      s = (s * 16807) % 2147483647;
+      return s / 2147483647;
+    };
+    return Array.from({ length: 64 }, () => ({
+      x: +(rnd() * 100).toFixed(2),
+      y: +(rnd() * 100).toFixed(2),
+      r: +(rnd() * 1.6 + 0.5).toFixed(2),
+      d: +(rnd() * 5).toFixed(2),
+      o: +(rnd() * 0.5 + 0.35).toFixed(2),
+    }));
+  }, []);
+
+  return (
+    <div className="wwu-stars" aria-hidden="true">
+      <svg className="wwu-stars-s" width="100%" height="100%">
+        {stars.map((s, i) =>
+          i % 3 === 2 ? null : <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.r / 2} fill="#cfe0ff" opacity={s.o} />
+        )}
+      </svg>
+      {stars.map((s, i) =>
+        i % 3 !== 2 ? null : (
+          <span
+            key={i}
+            className="wwu-star"
+            style={
+              {
+                left: `${s.x}%`,
+                top: `${s.y}%`,
+                width: s.r,
+                height: s.r,
+                animationDelay: `${s.d}s`,
+                "--o": s.o,
+              } as CSSProperties
+            }
+          />
+        )
+      )}
+    </div>
+  );
+});
+
 /* ───────────────────────── flipbook handle (minimal typing) ───────────────────────── */
 
 type FlipApi = {
@@ -1463,6 +1611,57 @@ type FlipApi = {
   getState: () => string;
 };
 type FlipHandle = { pageFlip: () => FlipApi };
+
+/** The book itself. Memoised: it only re-renders when the book size (or the pages) change. */
+const Book = memo(function Book({
+  pw,
+  ph,
+  pages,
+  onFlip,
+  onState,
+  setRef,
+}: {
+  pw: number;
+  ph: number;
+  pages: ReactElement[];
+  onFlip: (e: { data: number }) => void;
+  onState: (e: { data: string }) => void;
+  setRef: (r: unknown) => void;
+}) {
+  return (
+    <HTMLFlipBook
+      key={`${pw}x${ph}`}
+      ref={setRef}
+      width={pw}
+      height={ph}
+      size="fixed"
+      minWidth={pw}
+      maxWidth={pw}
+      minHeight={ph}
+      maxHeight={ph}
+      drawShadow
+      maxShadowOpacity={0.55}
+      flippingTime={FLIP_MS}
+      usePortrait={false}
+      startZIndex={0}
+      autoSize={false}
+      showCover
+      mobileScrollSupport
+      clickEventForward
+      useMouseEvents
+      swipeDistance={30}
+      showPageCorners
+      disableFlipByClick={false}
+      startPage={0}
+      className="wwu-flip"
+      style={EMPTY_STYLE}
+      onFlip={onFlip}
+      onChangeState={onState}
+    >
+      {pages}
+    </HTMLFlipBook>
+  );
+});
 
 /* ───────────────────────── MAIN ───────────────────────── */
 
@@ -1478,15 +1677,23 @@ export default function WhyWorkWithUs() {
   const [armed, setArmed] = useState(false); // book has been mounted at least once
   const [lite, setLite] = useState(false); // weak device: far fewer animations
 
-  /* viewport (resize is debounced so the book is not rebuilt while dragging the window) */
+  const liveRef = useRef(false);
+  const kickRef = useRef<() => void>(() => {});
+
+  /* viewport (resize is debounced so the book is not rebuilt while dragging the window;
+     height-only jitter < 140px, e.g. the mobile address bar, is ignored so the book is not rebuilt mid-scroll) */
   useEffect(() => {
     let t = 0;
-    const measure = () => setView({ w: window.innerWidth, h: window.innerHeight });
+    const measure = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      setView((v) => (v.w === w && Math.abs(v.h - h) < 140 && v.h !== 800 ? v : v.w === w && v.h === h ? v : { w, h }));
+    };
     const onResize = () => {
       window.clearTimeout(t);
       t = window.setTimeout(measure, 120);
     };
-    measure();
+    setView({ w: window.innerWidth, h: window.innerHeight });
     setMounted(true);
 
     /* weak device: 4 cores or fewer, 2 GB of memory or less, or the visitor asked for "save data" */
@@ -1504,14 +1711,19 @@ export default function WhyWorkWithUs() {
   useEffect(() => {
     const el = sectionRef.current;
     if (!el || typeof IntersectionObserver === "undefined") {
+      liveRef.current = true;
       setLive(true);
       setArmed(true);
       return;
     }
     const io = new IntersectionObserver(
       ([e]) => {
+        liveRef.current = e.isIntersecting;
         setLive(e.isIntersecting);
-        if (e.isIntersecting) setArmed(true);
+        if (e.isIntersecting) {
+          setArmed(true);
+          kickRef.current(); // catch up with the scroll position when coming back
+        }
       },
       { rootMargin: "80% 0px" }
     );
@@ -1548,7 +1760,7 @@ export default function WhyWorkWithUs() {
     return { S, pw, ph, k, tx, bx };
   }, [view, mobile]);
 
-  /* scroll -> phase / active */
+  /* scroll -> phase / active (one rAF per frame; state is only set when the value really changes) */
   useEffect(() => {
     const el = sectionRef.current;
     if (!el) return;
@@ -1564,21 +1776,26 @@ export default function WhyWorkWithUs() {
       setActive(p < START ? -1 : Math.min(REASONS.length - 1, Math.floor(((p - START) / (END - START)) * REASONS.length)));
       if (barRef.current) barRef.current.style.transform = `scaleX(${p})`;
     };
-    const onScroll = () => {
+    const schedule = () => {
       if (!raf) raf = requestAnimationFrame(update);
     };
+    /* while the section is far off-screen nothing needs measuring */
+    const onScroll = () => {
+      if (liveRef.current) schedule();
+    };
 
+    kickRef.current = schedule;
     update();
     window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("resize", schedule);
     return () => {
       window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("resize", schedule);
       if (raf) cancelAnimationFrame(raf);
     };
   }, []);
 
-  /* book flip controller: polls the library state, so it can never get stuck */
+  /* book flip controller: event-driven, with a slow safety tick so it can never get stuck */
   const bookRef = useRef<FlipHandle | null>(null);
   const targetRef = useRef(0);
   const activeRef = useRef(-1);
@@ -1606,10 +1823,23 @@ export default function WhyWorkWithUs() {
     }
   }, []);
 
-  /* the poll only runs while the section is near the screen */
+  /* 1) the target changed (scroll moved to another reason) */
+  useEffect(() => {
+    if (mounted && armed) sync();
+  }, [target, mounted, armed, sync]);
+
+  /* 2) a flip just finished: continue towards the target (chained flips) */
+  const onState = useCallback(
+    (e: { data: string }) => {
+      if (e.data === "read") window.setTimeout(sync, 16);
+    },
+    [sync]
+  );
+
+  /* 3) safety tick, only while the section is near the screen */
   useEffect(() => {
     if (!mounted || !armed || !live) return;
-    const id = window.setInterval(sync, 90);
+    const id = window.setInterval(sync, 250);
     return () => window.clearInterval(id);
   }, [mounted, armed, live, sync]);
 
@@ -1637,22 +1867,6 @@ export default function WhyWorkWithUs() {
     },
     [goTo]
   );
-
-  /* stars (seeded so server and client match). Only every 3rd one twinkles (see CSS). */
-  const stars = useMemo(() => {
-    let s = 11;
-    const rnd = () => {
-      s = (s * 16807) % 2147483647;
-      return s / 2147483647;
-    };
-    return Array.from({ length: 64 }, () => ({
-      x: +(rnd() * 100).toFixed(2),
-      y: +(rnd() * 100).toFixed(2),
-      r: +(rnd() * 1.6 + 0.5).toFixed(2),
-      d: +(rnd() * 5).toFixed(2),
-      o: +(rnd() * 0.5 + 0.35).toFixed(2),
-    }));
-  }, []);
 
   /* ───────── book pages ───────── */
   const { pw, ph, S, k, tx, bx } = dims;
@@ -1749,36 +1963,7 @@ export default function WhyWorkWithUs() {
           <div className="wwu-slide" style={{ transform: phase < 2 ? `translateX(${-pw / 2}px)` : "translateX(0px)" }}>
             <div className="wwu-float">
               <div className="wwu-tilt">
-                <HTMLFlipBook
-                  key={`${pw}x${ph}`}
-                  ref={setBookRef}
-                  width={pw}
-                  height={ph}
-                  size="fixed"
-                  minWidth={pw}
-                  maxWidth={pw}
-                  minHeight={ph}
-                  maxHeight={ph}
-                  drawShadow
-                  maxShadowOpacity={0.55}
-                  flippingTime={FLIP_MS}
-                  usePortrait={false}
-                  startZIndex={0}
-                  autoSize={false}
-                  showCover
-                  mobileScrollSupport
-                  clickEventForward
-                  useMouseEvents
-                  swipeDistance={30}
-                  showPageCorners
-                  disableFlipByClick={false}
-                  startPage={0}
-                  className="wwu-flip"
-                  style={{}}
-                  onFlip={onFlip}
-                >
-                  {pages}
-                </HTMLFlipBook>
+                <Book pw={pw} ph={ph} pages={pages} onFlip={onFlip} onState={onState} setRef={setBookRef} />
               </div>
             </div>
           </div>
@@ -1800,24 +1985,7 @@ export default function WhyWorkWithUs() {
 
       <div className="wwu-sticky">
         {/* backdrop */}
-        <div className="wwu-stars" aria-hidden="true">
-          {stars.map((s, i) => (
-            <span
-              key={i}
-              className="wwu-star"
-              style={
-                {
-                  left: `${s.x}%`,
-                  top: `${s.y}%`,
-                  width: s.r,
-                  height: s.r,
-                  animationDelay: `${s.d}s`,
-                  "--o": s.o,
-                } as React.CSSProperties
-              }
-            />
-          ))}
-        </div>
+        <Stars />
 
         {/* heading */}
         <header className="wwu-head" style={{ width: headW }}>
@@ -1839,76 +2007,11 @@ export default function WhyWorkWithUs() {
             transform: shifted ? `translateX(${n2(tx)}px) scale(${n2(k)})` : "translateX(0px) scale(1)",
           }}
         >
-          <svg className="wwu-svg" viewBox={`0 0 ${VB} ${VB}`} role="img" aria-label="Six team members sitting around a table">
-            <defs>
-              {/* table: deep navy glass that matches the site (navy night, electric-blue neon, icy white) */}
-              <radialGradient id="wwuTable" cx="50%" cy="42%" r="62%">
-                <stop offset="0" stopColor="#0d2f8f" />
-                <stop offset="0.55" stopColor="#061a52" />
-                <stop offset="1" stopColor="#020a24" />
-              </radialGradient>
-              {/* neon glow around the rim, drawn as a gradient (no blur filter) */}
-              <radialGradient id="wwuTableGlow" cx="50%" cy="50%" r="50%">
-                <stop offset="0.72" stopColor="#2f6bff" stopOpacity="0" />
-                <stop offset="0.79" stopColor="#3b8bff" stopOpacity="0.5" />
-                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
-              </radialGradient>
-              <radialGradient id="wwuHalo">
-                <stop offset="0" stopColor="#3b82ff" stopOpacity="0.55" />
-                <stop offset="1" stopColor="#3b82ff" stopOpacity="0" />
-              </radialGradient>
-
-              {/* centre star: core gradient + auras (no blur filters) */}
-              <radialGradient id="wwuCoreG" cx="50%" cy="50%" r="50%">
-                <stop offset="0" stopColor="#ffffff" />
-                <stop offset="0.35" stopColor="#bcd8ff" />
-                <stop offset="1" stopColor="#2f6bff" />
-              </radialGradient>
-              <radialGradient id="wwuStarAura">
-                <stop offset="0" stopColor="#4f8bff" stopOpacity="0.55" />
-                <stop offset="0.5" stopColor="#2f6bff" stopOpacity="0.18" />
-                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
-              </radialGradient>
-              <radialGradient id="wwuStarAura2">
-                <stop offset="0" stopColor="#cfe2ff" stopOpacity="0.8" />
-                <stop offset="0.4" stopColor="#4f8bff" stopOpacity="0.4" />
-                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
-              </radialGradient>
-
-              <PersonDefs />
-            </defs>
-
-            {/* table */}
-            <circle cx={500} cy={500} r={TABLE_R + 70} fill="url(#wwuTableGlow)" />
-            <circle cx={500} cy={500} r={TABLE_R} fill="url(#wwuTable)" stroke="#3b8bff" strokeWidth={3} />
-            <circle cx={500} cy={500} r={TABLE_R - 2} fill="none" stroke="#9cc4ff" strokeOpacity={0.4} strokeWidth={1} />
-            <circle cx={500} cy={500} r={TABLE_R - 34} fill="none" stroke="#4f8bff" strokeOpacity={0.28} strokeWidth={1.5} />
-            <circle cx={500} cy={500} r={TABLE_R - 70} fill="none" stroke="#9cc4ff" strokeOpacity={0.18} strokeWidth={1} strokeDasharray="2 8" />
-            {/* glass reflection */}
-            <ellipse cx={420} cy={372} rx={150} ry={52} transform="rotate(-28 420 372)" fill="#fff" opacity={0.045} />
-
-            {/* centre star: glow, shadow, pulse and a slow rotating ring */}
-            <g transform="translate(500 500)">
-              <circle r={175} fill="url(#wwuStarAura)" />
-              <circle className="wwu-ring" r={96} fill="none" stroke="#7fb0ff" strokeOpacity={0.35} strokeWidth={1.2} strokeDasharray="2 9" />
-              <g className="wwu-starfx">
-                <circle r={84} fill="url(#wwuStarAura2)" />
-                <path d={STAR_D} fill="#2f6bff" opacity={0.16} transform="scale(2.4)" />
-                <path d={STAR_D} fill="#4f8bff" opacity={0.3} transform="scale(2.0)" />
-                <path d={STAR_D} fill="url(#wwuCoreG)" transform="scale(1.6)" />
-                <path d={STAR_D} fill="#fff" opacity={0.9} transform="scale(0.5)" />
-              </g>
-            </g>
-
-            {/* people */}
-            {REASONS.map((r, i) => (
-              <g key={r.title} transform={`rotate(${ANGLES[i]} 500 500) translate(500 ${500 - SEAT_R})`}>
-                <g className={`wwu-person ${active === i ? "on" : ""} ${active < 0 ? "all" : ""}`}>
-                  <PersonM look={r.look} />
-                </g>
-              </g>
-            ))}
-          </svg>
+          {/* layer 0: table + star (static). layers 1-6: one svg per person */}
+          <TableArt />
+          {REASONS.map((r, i) => (
+            <PersonLayer key={r.title} look={r.look} index={i} on={active === i} all={active < 0} />
+          ))}
 
           {/* name pills */}
           {REASONS.map((r, i) => {
@@ -1956,13 +2059,15 @@ const CSS = `
   background:radial-gradient(ellipse at 50% 45%,#0a1534 0%,#040815 55%,#02040c 100%)}
 .wwu-m .wwu-sticky{flex-direction:column;gap:10px;padding-top:74px}
 
-/* animations only run while the section is on screen (nothing is removed) */
-.wwu:not(.live) *,.wwu:not(.live) *::before,.wwu:not(.live) *::after{animation-play-state:paused!important}
+/* animations only run while the section is on screen (explicit list: no universal selector to re-match on every toggle) */
+.wwu:not(.live) .wwu-star,.wwu:not(.live) .wwu-now,.wwu:not(.live) .wwu-hint,
+.wwu:not(.live) .wwu-float,.wwu:not(.live) .wwu-starfx,.wwu:not(.live) .wwu-ring,
+.wwu:not(.live) .wwu-body,.wwu:not(.live) .wwu-headg,.wwu:not(.live) .wwu-hand,.wwu:not(.live) .wwu-eyes{animation-play-state:paused!important}
 
-/* stars: only every 3rd one twinkles (cheap), the rest are static */
+/* stars: static ones are one svg, only every 3rd one twinkles (cheap) */
 .wwu-stars{position:absolute;inset:0;pointer-events:none}
-.wwu-star{position:absolute;border-radius:50%;background:#cfe0ff;opacity:var(--o)}
-.wwu-star:nth-child(3n){animation:wwuTw 5s ease-in-out infinite}
+.wwu-stars-s{position:absolute;inset:0;display:block}
+.wwu-star{position:absolute;border-radius:50%;background:#cfe0ff;opacity:var(--o);animation:wwuTw 5s ease-in-out infinite}
 @keyframes wwuTw{0%,100%{opacity:var(--o)}50%{opacity:.12}}
 
 /* heading */
@@ -1978,6 +2083,9 @@ const CSS = `
 /* scene: slides to the right and shrinks a little when the book starts (compositor-only) */
 .wwu-scene{position:relative;flex:none;transform-origin:50% 50%;transition:transform 1.1s cubic-bezier(.65,.02,.2,1);will-change:transform}
 .wwu-svg{width:100%;height:100%;display:block;overflow:visible}
+/* every person is its own svg stacked on the table; the active one gets its own compositor layer */
+.wwu-psvg{position:absolute;left:0;top:0;pointer-events:none}
+.wwu-psvg.hot{will-change:transform}
 .wwu-person{opacity:.7;transition:opacity .6s ease,transform .6s ease}
 .wwu-person.all{opacity:.92}
 .wwu-person.on{opacity:1;transform:scale(1.07)}
@@ -2120,7 +2228,7 @@ const CSS = `
 
 /* progress + hint */
 .wwu-progress{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(80,140,255,.12);z-index:7}
-.wwu-progress div{height:100%;transform-origin:left;transform:scaleX(0);background:linear-gradient(90deg,#2f6bff,#9cc4ff)}
+.wwu-progress div{height:100%;transform-origin:left;transform:scaleX(0);will-change:transform;background:linear-gradient(90deg,#2f6bff,#9cc4ff)}
 .wwu-hint{position:absolute;bottom:4vh;left:0;right:0;text-align:center;margin:0;font-size:14px;color:#8fb0ee;z-index:6;animation:wwuNow .8s ease both}
 
 /* centre star */
@@ -2130,10 +2238,11 @@ const CSS = `
 .wwu-ring{animation:wwuSpin 40s linear infinite}
 @keyframes wwuSpin{to{transform:rotate(360deg)}}
 
-/* weak devices: keep everything visible, drop the ambient motion */
+/* weak devices: keep everything visible, drop the ambient motion and the blurred screenshot backdrop */
 .wwu-lite .wwu-star,.wwu-lite .wwu-float,.wwu-lite .wwu-starfx,.wwu-lite .wwu-ring,
 .wwu-lite .wwu-person .wwu-body,.wwu-lite .wwu-person .wwu-headg,.wwu-lite .wwu-person .wwu-eyes{animation:none!important}
 .wwu-lite .wwu-aura{opacity:.6}
+.wwu-lite .wwu-shot img.bg{display:none}
 
 @media (prefers-reduced-motion:reduce){
   .wwu-star,.wwu-float,.wwu-person.on .wwu-body,.wwu-person.on .wwu-headg,.wwu-person.on .wwu-hand,.wwu-starfx,.wwu-ring{animation:none}

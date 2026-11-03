@@ -8,6 +8,8 @@ import React, {
   useMemo,
   useCallback,
   memo,
+  startTransition,
+  useSyncExternalStore,
 } from "react";
 import {
   motion,
@@ -20,15 +22,17 @@ import {
 } from "motion/react";
 
 /* =====================================================================
-   PERFORMANCE NOTES (what changed vs. the previous version)
+   PERFORMANCE NOTES
    - Open-only parts (hardcover boards, page stacks, fold, left page, right page)
-     are mounted only when a book is hovered / focused / opened, not for all 7 books at load.
+     are mounted only when a book is hovered (with a short intent delay) / focused / pressed / opened.
    - Grain textures (SVG noise) switch on after first paint via [data-fx] (idle callback).
-   - Star canvases render at 1x DPR (3 full-size canvases were ~4x heavier at 1.5x),
-     the twinkle pauses while the section is off-screen, and low-end devices get a static sky.
-   - content-visibility:auto skips rendering the whole section until it nears the viewport.
-   - Removed the big drop-shadow filter and the mix-blend-soft-light layers (both are slow on weak GPUs).
-   - ServiceCard is memoized with stable callbacks, so opening one book doesn't re-render the other six.
+   - Star canvases render at 1x DPR, twinkle pauses off-screen, low-end devices get a static sky.
+   - content-visibility:auto skips rendering the section until it nears the viewport.
+   - No big drop-shadow filters, no mix-blend layers, no backdrop-blur on the sheet.
+   - ServiceCard + CardSlot are memoized with stable props, so grabbing / opening one book
+     re-renders only that book (z-index is stored per card, not as a reordered list).
+   - Mouse tilt reads layout at most once per animation frame.
+   - Resize relayout is debounced; media queries use useSyncExternalStore (no extra first render).
    - will-change is only set while a card is being dragged.
    ===================================================================== */
 
@@ -55,7 +59,7 @@ const TWINKLE_CSS = `
   }
 `;
 
-const SpaceBackdrop = () => {
+const SpaceBackdropBase = () => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
 
@@ -186,18 +190,26 @@ const SpaceBackdrop = () => {
   );
 };
 
+// memoized: never re-renders when the parent does
+const SpaceBackdrop = memo(SpaceBackdropBase);
+
 /* ---------------- Small hooks ---------------- */
 
+// useSyncExternalStore: correct value on the first client render (no false -> true flash / extra render)
 function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia(query);
-    const update = () => setMatches(mq.matches);
-    update();
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, [query]);
-  return matches;
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      const mq = window.matchMedia(query);
+      mq.addEventListener("change", cb);
+      return () => mq.removeEventListener("change", cb);
+    },
+    [query],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => window.matchMedia(query).matches,
+    () => false,
+  );
 }
 
 /* ---------------- Draggable card ---------------- */
@@ -233,6 +245,8 @@ export const DraggableCardBody = ({
   const mouseX = useMotionValue(0);
   const mouseY = useMotionValue(0);
   const cardRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef(0);
+  const lastPt = useRef({ x: 0, y: 0 });
 
   const springConfig = {
     stiffness: 100,
@@ -248,6 +262,8 @@ export const DraggableCardBody = ({
     useTransform(mouseX, [-300, 300], [-25, 25]),
     springConfig,
   );
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
   // flatten the tilt when the book opens
   useEffect(() => {
@@ -272,16 +288,25 @@ export const DraggableCardBody = ({
     if (ny !== y.get()) animate(y, ny, spring);
   }, [cl, cr, ct, cb, x, y]);
 
+  // at most ONE layout read per animation frame, however fast the mouse fires events
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (flat) return;
-    const rect = cardRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    // divide by unit so small cards tilt as much as big ones
-    mouseX.set((e.clientX - (rect.left + rect.width / 2)) / unit);
-    mouseY.set((e.clientY - (rect.top + rect.height / 2)) / unit);
+    lastPt.current.x = e.clientX;
+    lastPt.current.y = e.clientY;
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      const rect = cardRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      // divide by unit so small cards tilt as much as big ones
+      mouseX.set((lastPt.current.x - (rect.left + rect.width / 2)) / unit);
+      mouseY.set((lastPt.current.y - (rect.top + rect.height / 2)) / unit);
+    });
   };
 
   const handleMouseLeave = () => {
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = 0;
     mouseX.set(0);
     mouseY.set(0);
   };
@@ -1242,6 +1267,8 @@ const COVER_EASE = [0.55, 0.02, 0.2, 1] as const;
 const edgeVars = (dir: string, base: string) =>
   ({ "--d": dir, "--board": `rgb(${base})` }) as React.CSSProperties;
 
+type Fit = { scale: number; dx: number; dy: number };
+
 const ServiceCardBase = ({
   service,
   index,
@@ -1258,7 +1285,7 @@ const ServiceCardBase = ({
   onOpen: (index: number) => void;
   onClose: () => void;
   /** tells the parent how big the open book is, so dragging can keep it inside the section */
-  onFit?: (fit: { scale: number; dx: number; dy: number }) => void;
+  onFit?: (fit: Fit) => void;
 }) => {
   const { title, accent, base } = service;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -1266,19 +1293,25 @@ const ServiceCardBase = ({
   // only count it as a click if the pointer barely moved (so dragging never opens the book)
   const down = useRef<{ x: number; y: number } | null>(null);
   const [hovered, setHovered] = useState(false);
-  const [fit, setFit] = useState({ scale: OPEN_SCALE_MAX, dx: 0, dy: 0 });
+  const [fit, setFit] = useState<Fit>({ scale: OPEN_SCALE_MAX, dx: 0, dy: 0 });
   const onFitRef = useRef(onFit);
   onFitRef.current = onFit;
 
   // The heavy "open book" parts (boards, page stacks, fold, both pages) only exist in the DOM
-  // while the book is open, or just before (hover / focus / press) and just after (close animation).
+  // while the book is open, or just before (hover intent / focus / press) and just after (close animation).
   const [warm, setWarm] = useState(false);
   const show = open || warm;
+  const warmTimer = useRef(0);
+  // low-priority mount so a hover never blocks the tilt / hover animation
+  const warmUp = useCallback(() => startTransition(() => setWarm(true)), []);
+  useEffect(() => () => clearTimeout(warmTimer.current), []);
+
+  // unmount the open-book parts a while after closing, but never while the pointer is still on the book
   useEffect(() => {
-    if (open || !warm) return;
+    if (open || !warm || hovered) return;
     const id = setTimeout(() => setWarm(false), 1600);
     return () => clearTimeout(id);
-  }, [open, warm]);
+  }, [open, warm, hovered]);
 
   // the info page sits under the cover while closed: keep its links out of the tab order / screen readers
   useEffect(() => {
@@ -1341,17 +1374,23 @@ const ServiceCardBase = ({
           onOpen(index);
         }
       }}
-      onFocus={() => setWarm(true)}
+      onFocus={warmUp}
       onPointerEnter={(e) => {
         if (e.pointerType === "mouse") {
           setHovered(true);
-          setWarm(true);
+          // hover intent: ignore fly-over hovers while the mouse sweeps across the pile
+          clearTimeout(warmTimer.current);
+          warmTimer.current = window.setTimeout(warmUp, 140);
         }
       }}
-      onPointerLeave={() => setHovered(false)}
+      onPointerLeave={() => {
+        setHovered(false);
+        clearTimeout(warmTimer.current);
+      }}
       onPointerDown={(e) => {
         down.current = { x: e.clientX, y: e.clientY };
-        setWarm(true);
+        clearTimeout(warmTimer.current);
+        setWarm(true); // a press is immediate
       }}
       onPointerUp={(e) => {
         const d = down.current;
@@ -1712,7 +1751,8 @@ const ServiceSheet = ({
       role="dialog"
       aria-modal="true"
       aria-label={service.title}
-      className="fixed inset-0 z-[1000] overflow-y-auto bg-black/80 backdrop-blur-sm"
+      // plain dark overlay: backdrop-blur is very expensive on mid-range phones
+      className="fixed inset-0 z-[1000] overflow-y-auto bg-black/85"
       onClick={onClose}
     >
       <div className="flex min-h-full items-center justify-center p-4">
@@ -1745,6 +1785,7 @@ const ServiceSheet = ({
 
 // Put your images in /public/services/ and they show up on the cover and the left page.
 // Until the file exists, a placeholder is shown.
+// Tip: use .webp / .avif at ~840x1120 (2x of 420x560), under ~80 KB each.
 // `base` values are the original ones multiplied by ~0.78 (a little darker).
 // Each book has 3 pages: features (page 1), about + steps (page 2), FAQ (page 3).
 const SERVICES: Service[] = [
@@ -1942,18 +1983,19 @@ const SERVICES: Service[] = [
 /* ---------------- SEO: real text + structured data for crawlers and screen readers ---------------- */
 // The same copy users see in the books (all 3 pages of every book), always present in the HTML,
 // even while the books are closed and their pages aren't mounted.
-const SeoContent = () => {
-  const jsonLd = {
-    "@context": "https://schema.org",
-    "@graph": SERVICES.map((s) => ({
-      "@type": "Service",
-      name: s.title,
-      serviceType: s.title,
-      description: `${s.desc} ${s.about}`,
-      provider: { "@type": "Organization", name: "ShivayTech" },
-    })),
-  };
+// The JSON is built ONCE at module load, not on every render.
+const SEO_JSON = JSON.stringify({
+  "@context": "https://schema.org",
+  "@graph": SERVICES.map((s) => ({
+    "@type": "Service",
+    name: s.title,
+    serviceType: s.title,
+    description: `${s.desc} ${s.about}`,
+    provider: { "@type": "Organization", name: "ShivayTech" },
+  })),
+}).replace(/</g, "\\u003c");
 
+const SeoContent = memo(function SeoContent() {
   return (
     <>
       <div className="sr-only">
@@ -1988,11 +2030,11 @@ const SeoContent = () => {
       </div>
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }}
+        dangerouslySetInnerHTML={{ __html: SEO_JSON }}
       />
     </>
   );
-};
+});
 
 // Where each card rests in the pile, as a fraction (0..1) of the free room inside the section.
 // Same loose pile as the original desktop layout, but it now scales with the section size.
@@ -2041,12 +2083,108 @@ function computeLayout(W: number) {
   return { unit, cardW, cardH, height, spots };
 }
 
+type Layout = ReturnType<typeof computeLayout>;
+
+/* ---------------- One slot in the pile ---------------- */
+// Memoized with stable props: grabbing a book changes only that book's z value,
+// so the other six slots (and their books) don't re-render at all.
+
+const CardSlot = memo(function CardSlot({
+  item,
+  i,
+  layout,
+  width,
+  z,
+  bookOpen,
+  openFit,
+  touch,
+  flat,
+  onFront,
+  onOpen,
+  onClose,
+  onFit,
+}: {
+  item: Service;
+  i: number;
+  layout: Layout;
+  width: number;
+  z: number;
+  bookOpen: boolean;
+  openFit: Fit | null;
+  touch: boolean;
+  flat: boolean;
+  onFront: (i: number) => void;
+  onOpen: (i: number) => void;
+  onClose: () => void;
+  onFit: (f: Fit) => void;
+}) {
+  const spot = layout.spots[i];
+
+  // closed: the card stays inside the section.
+  // open: the whole open book stays inside the section while you drag it.
+  const constraints = useMemo<Bounds>(() => {
+    if (!bookOpen || !openFit) return spot.constraints;
+    const margin = 16;
+    const hw = PAGE_W * openFit.scale;
+    const hh = (PAGE_H * openFit.scale) / 2;
+    const cx = spot.left + layout.cardW / 2;
+    const cy = spot.top + layout.cardH / 2;
+    return {
+      left: Math.min(0, margin + hw - cx - openFit.dx),
+      right: Math.max(0, width - margin - hw - cx - openFit.dx),
+      top: Math.min(0, margin + hh - cy - openFit.dy),
+      bottom: Math.max(0, layout.height - margin - hh - cy - openFit.dy),
+    };
+  }, [bookOpen, openFit, spot, layout, width]);
+
+  const style = useMemo<React.CSSProperties>(
+    () => ({
+      left: spot.left,
+      top: spot.top,
+      width: layout.cardW,
+      height: layout.cardH,
+      zIndex: bookOpen ? 1_000_000 : z,
+    }),
+    [spot, layout, bookOpen, z],
+  );
+
+  const handleFront = useCallback(() => onFront(i), [onFront, i]);
+
+  return (
+    <DraggableCardBody
+      unit={layout.unit}
+      touch={touch}
+      flat={flat}
+      constraints={constraints}
+      onFront={handleFront}
+      style={style}
+      className={cn(
+        "absolute",
+        item.className,
+        "transition-[rotate] duration-500 motion-reduce:transition-none",
+        bookOpen && "rotate-0!",
+      )}
+    >
+      <ServiceCard
+        service={item}
+        index={i}
+        unit={layout.unit}
+        open={bookOpen}
+        onOpen={onOpen}
+        onClose={onClose}
+        onFit={onFit}
+      />
+    </DraggableCardBody>
+  );
+});
+
 /* ---------------- Demo ---------------- */
 
 export default function DraggableCardDemo() {
   const [active, setActive] = useState<number | null>(null);
-  const [order, setOrder] = useState<number[]>(() => SERVICES.map((_, i) => i));
-  const [openFit, setOpenFit] = useState<{ scale: number; dx: number; dy: number } | null>(null);
+  // per-card z-index: grabbing a card changes only its own value
+  const [zs, setZs] = useState<number[]>(() => SERVICES.map((_, i) => i + 1));
+  const [openFit, setOpenFit] = useState<Fit | null>(null);
   const [width, setWidth] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -2073,15 +2211,22 @@ export default function DraggableCardDemo() {
     return () => clearTimeout(id);
   }, []);
 
-  // measure the section width (before first paint, then on every resize)
+  // measure the section width: first measure is immediate (before first paint), later resizes are debounced
   useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
+    let t = 0;
     const update = () => setWidth(Math.round(el.clientWidth));
     update();
-    const ro = new ResizeObserver(update);
+    const ro = new ResizeObserver(() => {
+      clearTimeout(t);
+      t = window.setTimeout(update, 120);
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      clearTimeout(t);
+      ro.disconnect();
+    };
   }, []);
 
   const layout = useMemo(() => (width ? computeLayout(width) : null), [width]);
@@ -2096,12 +2241,13 @@ export default function DraggableCardDemo() {
     return () => window.removeEventListener("keydown", onKey);
   }, [active]);
 
-  // grabbed card goes on top of the pile
-  const bringToFront = useCallback(
-    (i: number) =>
-      setOrder((o) => (o[o.length - 1] === i ? o : [...o.filter((n) => n !== i), i])),
-    [],
-  );
+  // grabbed card goes on top of the pile (only that card's z changes)
+  const bringToFront = useCallback((i: number) => {
+    setZs((prev) => {
+      const max = Math.max(...prev);
+      return prev[i] === max ? prev : prev.map((z, k) => (k === i ? max + 1 : z));
+    });
+  }, []);
 
   // stable callbacks so the memoized cards don't re-render when another book opens
   const handleOpen = useCallback(
@@ -2167,58 +2313,24 @@ export default function DraggableCardDemo() {
 
         {layout &&
           SERVICES.map((item, i) => {
-            const spot = layout.spots[i];
             const bookOpen = active === i && !compact;
-
-            // closed: the card stays inside the section.
-            // open: the whole open book stays inside the section while you drag it.
-            let constraints: Bounds = spot.constraints;
-            if (bookOpen && openFit) {
-              const margin = 16;
-              const hw = PAGE_W * openFit.scale;
-              const hh = (PAGE_H * openFit.scale) / 2;
-              const cx = spot.left + layout.cardW / 2;
-              const cy = spot.top + layout.cardH / 2;
-              constraints = {
-                left: Math.min(0, margin + hw - cx - openFit.dx),
-                right: Math.max(0, width - margin - hw - cx - openFit.dx),
-                top: Math.min(0, margin + hh - cy - openFit.dy),
-                bottom: Math.max(0, layout.height - margin - hh - cy - openFit.dy),
-              };
-            }
-
             return (
-              <DraggableCardBody
+              <CardSlot
                 key={item.title}
-                unit={layout.unit}
+                item={item}
+                i={i}
+                layout={layout}
+                width={width}
+                z={zs[i]}
+                bookOpen={bookOpen}
+                openFit={bookOpen ? openFit : null}
                 touch={touch}
                 flat={bookOpen || !!reduceMotion}
-                constraints={constraints}
-                onFront={() => bringToFront(i)}
-                style={{
-                  left: spot.left,
-                  top: spot.top,
-                  width: layout.cardW,
-                  height: layout.cardH,
-                  zIndex: bookOpen ? 100 : order.indexOf(i) + 1,
-                }}
-                className={cn(
-                  "absolute",
-                  item.className,
-                  "transition-[rotate] duration-500 motion-reduce:transition-none",
-                  bookOpen && "rotate-0!",
-                )}
-              >
-                <ServiceCard
-                  service={item}
-                  index={i}
-                  unit={layout.unit}
-                  open={bookOpen}
-                  onOpen={handleOpen}
-                  onClose={handleClose}
-                  onFit={setOpenFit}
-                />
-              </DraggableCardBody>
+                onFront={bringToFront}
+                onOpen={handleOpen}
+                onClose={handleClose}
+                onFit={setOpenFit}
+              />
             );
           })}
       </DraggableCardContainer>
@@ -2227,7 +2339,7 @@ export default function DraggableCardDemo() {
         <ServiceSheet
           service={SERVICES[active]}
           index={active}
-          onClose={() => setActive(null)}
+          onClose={handleClose}
         />
       )}
     </MotionConfig>

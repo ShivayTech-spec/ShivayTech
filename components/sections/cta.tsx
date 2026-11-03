@@ -7,15 +7,21 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import gsap from "gsap";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
+/* OPTIMIZATION NOTES (CSS)
+   - backdrop-filter removed from the panel and the button: re-blurring a live WebGL canvas every frame is very expensive.
+     Replaced by a slightly more opaque background so the look stays the same.
+   - filter: blur() removed from the panel entrance keyframes (forces a repaint every frame).
+   - The infinite box-shadow pulse on the button (repaint every frame) is replaced by a compositor-only `scale` pulse.
+   - touch-action: pan-y on the canvas so touch scrolling is never delayed by the pointer handlers. */
 const CSS = `
 .st-cta { position: relative; background: #02040c; }
 .st-cta__stick {
-  position: sticky; top: 0; height: 100vh; overflow: hidden;
+  position: sticky; top: 0; height: 100vh; overflow: hidden; contain: layout paint;
   background: radial-gradient(ellipse at 50% 125%, #0b2a66 0%, #050c24 45%, #02040c 75%);
 }
 .st-cta__canvas { position: absolute; inset: 0; opacity: 0; transition: opacity 0.9s ease; }
 .st-cta__canvas.is-on { opacity: 1; }
-.st-cta__canvas canvas { display: block; width: 100%; height: 100%; }
+.st-cta__canvas canvas { display: block; width: 100%; height: 100%; touch-action: pan-y; }
 
 .st-cta__hint {
   position: absolute; left: 50%; bottom: 6vh; transform: translateX(-50%);
@@ -35,14 +41,15 @@ const CSS = `
 .st-cta__panel {
   position: absolute; left: 6vw; top: 50%; transform: translateY(-50%);
   width: min(440px, 88vw); padding: 28px; color: #e8f1ff; overflow: hidden;
-  background: rgba(6, 14, 34, 0.55); backdrop-filter: blur(14px);
+  background: rgba(6, 14, 34, 0.86);
   border: 1px solid rgba(58, 160, 255, 0.55); border-radius: 22px;
   box-shadow: 0 0 28px rgba(58, 160, 255, 0.22), inset 0 0 24px rgba(58, 160, 255, 0.08);
   animation: st-panel 1s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 .st-cta__panel::before {
-  content: ""; position: absolute; top: 0; left: -60%; width: 40%; height: 100%; pointer-events: none;
+  content: ""; position: absolute; top: 0; left: 0; width: 40%; height: 100%; pointer-events: none;
   background: linear-gradient(100deg, transparent, rgba(120, 190, 255, 0.28), transparent);
+  transform: translateX(-150%);
   animation: st-sweep 1.4s 0.3s ease-out both;
 }
 .st-cta__panel > * { animation: st-rise 0.7s cubic-bezier(0.2, 0.9, 0.2, 1) both; }
@@ -52,11 +59,12 @@ const CSS = `
 .st-cta__panel > *:nth-child(4) { animation-delay: 0.65s; }
 .st-cta__panel > *:nth-child(5) { animation-delay: 0.8s; }
 @keyframes st-panel {
-  from { opacity: 0; transform: translateY(-44%) scale(0.92); filter: blur(10px); }
-  to { opacity: 1; transform: translateY(-50%) scale(1); filter: blur(0); }
+  from { opacity: 0; transform: translateY(-44%) scale(0.92); }
+  to { opacity: 1; transform: translateY(-50%) scale(1); }
 }
 @keyframes st-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes st-sweep { from { left: -60%; } to { left: 130%; } }
+/* sweep now uses transform (compositor) instead of animating "left" (layout) */
+@keyframes st-sweep { from { transform: translateX(-150%); } to { transform: translateX(325%); } }
 .st-cta__panel h2 { margin: 0 0 10px; font-size: clamp(26px, 3.2vw, 36px); line-height: 1.1; font-weight: 700; }
 .st-cta__panel p { margin: 0 0 20px; font-size: 15px; line-height: 1.55; color: #a9c0e6; }
 .st-cta__panel label { display: block; margin-bottom: 14px; font-size: 13px; color: #8fb2e8; }
@@ -85,20 +93,22 @@ const CSS = `
 .st-cta__start {
   position: absolute; left: 0; top: 0; display: inline-flex; align-items: center; justify-content: center;
   height: 50px; overflow: hidden; white-space: nowrap; font: inherit; font-size: 17px; font-weight: 700; color: #fff;
-  text-decoration: none; background: rgba(10, 28, 64, 0.82); backdrop-filter: blur(8px);
+  text-decoration: none; background: rgba(10, 28, 64, 0.92);
   border: 1.5px solid #6cc6ff; border-radius: 999px; cursor: pointer;
-  box-shadow: 0 0 26px rgba(80, 180, 255, 0.7), inset 0 0 14px rgba(80, 180, 255, 0.3);
+  box-shadow: 0 0 34px rgba(100, 195, 255, 0.85), inset 0 0 16px rgba(80, 180, 255, 0.4);
+  will-change: transform;
   animation: st-morph 1s cubic-bezier(0.2, 0.9, 0.2, 1) both, st-pulse 2.4s 1.1s ease-in-out infinite;
   transition: opacity 0.3s;
 }
 .st-cta__start span { animation: st-text 0.5s 0.55s ease both; }
-.st-cta__start:hover { background: rgba(40, 110, 220, 0.6); }
+.st-cta__start:hover { background: rgba(40, 110, 220, 0.7); }
 @keyframes st-morph {
   0% { max-width: 50px; padding: 0; box-shadow: 0 0 60px 14px rgba(160, 220, 255, 0.95); }
   100% { max-width: 300px; padding: 0 34px; }
 }
 @keyframes st-text { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
-@keyframes st-pulse { 0%, 100% { box-shadow: 0 0 22px rgba(80, 180, 255, 0.6), inset 0 0 14px rgba(80, 180, 255, 0.3); } 50% { box-shadow: 0 0 44px rgba(120, 210, 255, 1), inset 0 0 18px rgba(80, 180, 255, 0.5); } }
+/* "scale" is an individual transform property, so it composes with the JS-driven translate and runs on the compositor */
+@keyframes st-pulse { 0%, 100% { scale: 1; } 50% { scale: 1.05; } }
 
 .st-cta__welcome {
   position: absolute; left: 50%; top: 9vh; transform: translateX(-50%); margin: 0; text-align: center;
@@ -169,7 +179,7 @@ interface Quality {
   particles: number; nebula: number;
 }
 const HIGH_Q: Quality = {
-  low: false, pr: 2, antialias: true, shadows: true, shadowSize: 2048, planetSeg: [160, 120], stars: 1100,
+  low: false, pr: 1.75, antialias: true, shadows: true, shadowSize: 2048, planetSeg: [160, 120], stars: 1100,
   moonSeg: [220, 90], texSize: 512, rocks: 300, crystals: 48, earthSeg: [96, 72], cloth: [48, 32, 36, 14], particles: 220, nebula: 512,
 };
 const LOW_Q: Quality = {
@@ -801,12 +811,18 @@ function makeCloth(w: number, h: number, sx: number, sy: number, fab: THREE.Text
   const geo = new THREE.PlaneGeometry(w, h, sx, sy); geo.translate((dir * w) / 2, -h / 2, 0);
   const pos = geo.attributes.position, xs = new Float32Array(pos.count), ys = new Float32Array(pos.count), s = w / 2.4;
   for (let i = 0; i < pos.count; i++) { xs[i] = pos.getX(i); ys[i] = pos.getY(i); }
+  // per-vertex constants that never change are precomputed once (|x|, u, v and the static fold pattern)
+  const axA = new Float32Array(pos.count), uA = new Float32Array(pos.count), vA = new Float32Array(pos.count), foldA = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const x = xs[i], yy = ys[i], ax = Math.abs(x);
+    axA[i] = ax; uA[i] = ax / w; vA[i] = -yy / h;
+    foldA[i] = Math.sin(ax * 7 + Math.sin(yy * 1.7) * 1.5) * 0.07 + Math.sin(ax * 15 + yy * 2) * 0.02 + Math.sin(ax * 3.1 + 1) * 0.05;
+  }
   const update = (t: number, amp: number) => {
     for (let i = 0; i < pos.count; i++) {
-      const x = xs[i], yy = ys[i], ax = Math.abs(x), u = ax / w, v = -yy / h;
-      const fold = Math.sin(ax * 7 + Math.sin(yy * 1.7) * 1.5) * 0.07 + Math.sin(ax * 15 + yy * 2) * 0.02 + Math.sin(ax * 3.1 + 1) * 0.05;
+      const x = xs[i], yy = ys[i], ax = axA[i], u = uA[i], v = vA[i];
       const wave = amp * (Math.sin(ax * 3.2 - t * 7 + v * 1.5) + 0.35 * Math.sin(ax * 5.6 - t * 10.5 + yy * 2.3));
-      pos.setZ(i, (fold + wave) * s * u * (0.1 + 0.9 * v));
+      pos.setZ(i, (foldA[i] + wave) * s * u * (0.1 + 0.9 * v));
       // the cloth pulls in a little as it ripples
       pos.setX(i, x - dir * w * u * u * amp * 0.1 * (1 + Math.sin(t * 4 + v * 2)));
     }
@@ -880,7 +896,7 @@ function brandFlagTexture(logoSrc?: string) {
   };
   draw();
   if (logoSrc) {
-    const img = new Image(); img.crossOrigin = "anonymous";
+    const img = new Image(); img.crossOrigin = "anonymous"; img.decoding = "async";
     img.onload = () => draw(img);
     img.src = logoSrc;
   }
@@ -1630,19 +1646,31 @@ function createLunarEnvironment({ scene, site, R, up }: LunarEnvOptions, defer: 
             disposables.push({ dispose: () => asts.dispose() });
             const dummy = new THREE.Object3D();
 
+            // cached last-written values so unchanged uniforms / flags are not touched every frame
+            let lastFMoon = -1, lastFSky = -1;
+
             api.update = (t, dt, sp) => {
               const fMoon = sstep(sp, 0.5, 0.85), fSky = sstep(sp, 0.55, 0.9), fAst = sstep(sp, 0.6, 0.9);
 
-              moonMat.opacity = fMoon; moon.visible = fMoon > 0.005; rocks.visible = fMoon > 0.5;
+              if (fMoon !== lastFMoon) {
+                lastFMoon = fMoon;
+                moonMat.opacity = fMoon; moon.visible = fMoon > 0.005; rocks.visible = fMoon > 0.5;
+                crystals.visible = fMoon > 0.5;
+              }
 
-              // crystals pulse gently
-              crystals.visible = fMoon > 0.5;
-              crysMat.emissiveIntensity = 1.3 + 0.5 * Math.sin(t * 1.5);
+              // crystals pulse gently (only while visible)
+              if (crystals.visible) crysMat.emissiveIntensity = 1.3 + 0.5 * Math.sin(t * 1.5);
 
-              earthGroup.visible = flare.visible = fSky > 0.005;
-              earthMat.uniforms.uFade.value = fSky; atmoMat.uniforms.uFade.value = fSky; flareMat.opacity = fSky * 0.9;
-              earthMat.uniforms.uTime.value = t;
-              earth.rotation.y += dt * 0.004;
+              const skyOn = fSky > 0.005;
+              earthGroup.visible = flare.visible = skyOn;
+              if (skyOn) {
+                if (fSky !== lastFSky) {
+                  lastFSky = fSky;
+                  earthMat.uniforms.uFade.value = fSky; atmoMat.uniforms.uFade.value = fSky; flareMat.opacity = fSky * 0.9;
+                }
+                earthMat.uniforms.uTime.value = t;
+                earth.rotation.y += dt * 0.004;
+              }
 
               asts.visible = fAst > 0.005;
               if (asts.visible) {
@@ -1710,7 +1738,8 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       Q = detectLow() ? LOW_Q : HIGH_Q;
       let dead = false;
       const renderer = (() => {
-        try { return new THREE.WebGLRenderer({ antialias: Q.antialias, powerPreference: "high-performance" }); } catch { return null; }
+        // no stencil / alpha buffer: less memory and bandwidth (the scene paints its own opaque background)
+        try { return new THREE.WebGLRenderer({ antialias: Q.antialias, powerPreference: "high-performance", stencil: false, alpha: false }); } catch { return null; }
       })();
       if (!renderer) { setNoGL(true); return () => {}; }
 
@@ -1751,11 +1780,12 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       // stars (few, flat 2D twinkle)
       const SN = Q.stars, sPos = new Float32Array(SN * 3), sCol = new Float32Array(SN * 3), sPh = new Float32Array(SN), sSz = new Float32Array(SN);
       const tints = [new THREE.Color("#ffffff"), new THREE.Color("#ffe6c8"), new THREE.Color("#bcd6ff")];
+      const sv = new THREE.Vector3();
       for (let i = 0; i < SN; i++) {
-        const v = new THREE.Vector3().randomDirection().multiplyScalar(1000 + Math.random() * 400);
-        sPos.set([v.x, v.y, v.z], i * 3);
+        const v = sv.randomDirection().multiplyScalar(1000 + Math.random() * 400);
+        sPos[i * 3] = v.x; sPos[i * 3 + 1] = v.y; sPos[i * 3 + 2] = v.z;
         const c = tints[Math.floor(Math.random() * 3)];
-        sCol.set([c.r, c.g, c.b], i * 3);
+        sCol[i * 3] = c.r; sCol[i * 3 + 1] = c.g; sCol[i * 3 + 2] = c.b;
         sPh[i] = Math.random() * 6.283;
         sSz[i] = Math.random() < 0.1 ? 5 + Math.random() * 3 : 1.4 + Math.random() * 1.4;
       }
@@ -2024,12 +2054,12 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         },
       };
 
-      // dust puff
+      // dust puff (positions are written straight into the typed array: no per-particle array allocations)
       const puff = (x: number, z: number) => {
-        const n = Q.low ? 30 : 50, v: number[][] = [], pos = new Float32Array(n * 3);
+        const n = Q.low ? 30 : 50, v = new Float32Array(n * 3), pos = new Float32Array(n * 3);
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2, s = 0.6 + Math.random() * 1.6;
-          v.push([Math.cos(a) * s, 0.3 + Math.random() * 0.7, Math.sin(a) * s]);
+          v[i * 3] = Math.cos(a) * s; v[i * 3 + 1] = 0.3 + Math.random() * 0.7; v[i * 3 + 2] = Math.sin(a) * s;
         }
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
@@ -2039,7 +2069,11 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         gsap.to(o, {
           t: 1, duration: 1.4, ease: "power2.out",
           onUpdate() {
-            for (let i = 0; i < n; i++) pos.set([x + v[i][0] * o.t, y0 + v[i][1] * o.t * (1 - o.t * 0.6), z + v[i][2] * o.t], i * 3);
+            const ty = o.t * (1 - o.t * 0.6);
+            for (let i = 0; i < n; i++) {
+              const j = i * 3;
+              pos[j] = x + v[j] * o.t; pos[j + 1] = y0 + v[j + 1] * ty; pos[j + 2] = z + v[j + 2] * o.t;
+            }
             mat.opacity = 0.8 * (1 - o.t); geo.attributes.position.needsUpdate = true;
           },
           onComplete() { site.remove(pts); geo.dispose(); mat.dispose(); },
@@ -2120,15 +2154,22 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         if (W) W.cat.state.hover = v;
         if (v) { audio(); sfx.trill(); purrStart(); } else { purrStop(); }
       };
+      // pointermove only stores the latest event; the (layout-reading) raycast runs at most once per frame inside tick()
+      let pendMove: PointerEvent | null = null;
       const onDown = (e: PointerEvent) => { if (hitCat(e)) meowAnim(); };
-      const onMove = (e: PointerEvent) => {
+      const onMove = (e: PointerEvent) => { pendMove = e; };
+      const flushMove = () => {
+        const e = pendMove;
+        if (!e) return;
+        pendMove = null;
         const h = e.pointerType !== "touch" && hitCat(e);
-        host.style.cursor = h ? "pointer" : "";
+        const c = h ? "pointer" : "";
+        if (host.style.cursor !== c) host.style.cursor = c;
         setHover(h);
       };
-      const onLeave = () => { host.style.cursor = ""; setHover(false); };
+      const onLeave = () => { pendMove = null; host.style.cursor = ""; setHover(false); };
       renderer.domElement.addEventListener("pointerdown", onDown);
-      renderer.domElement.addEventListener("pointermove", onMove);
+      renderer.domElement.addEventListener("pointermove", onMove, { passive: true });
       renderer.domElement.addEventListener("pointerleave", onLeave);
 
       // scroll lock while boarding / launching
@@ -2212,7 +2253,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
               P.tx.needsUpdate = true;
             };
             draw();
-            const img = new Image(); img.crossOrigin = "anonymous";
+            const img = new Image(); img.crossOrigin = "anonymous"; img.decoding = "async";
             img.onload = () => { if (!dead) draw(img); };
             img.src = `https://flagcdn.com/w640/${cc.toLowerCase()}.png`;
             flag.mats.flag.map = F.tx; flag.mats.flag.needsUpdate = true;
@@ -2404,13 +2445,28 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         cam.aspect = wd / h; cam.updateProjectionMatrix();
         smokeScale();
       };
-      sizeIt(); window.addEventListener("resize", sizeIt);
+      sizeIt();
 
       const P0 = new THREE.Vector3(0, 35, 430), P1 = new THREE.Vector3(0, R * 3, 170), P2 = new THREE.Vector3(0, R + 1.7, 11);
       const P1b = new THREE.Vector3(0, R * 2.4, 150), P3 = new THREE.Vector3(0, 160, 1200); // far-away end of the flight path
       const look = new THREE.Vector3(), tmp = new THREE.Vector3(), clock = new THREE.Clock();
       const clamp = THREE.MathUtils.clamp;
       let sp = 0, raf = 0, running = false, shown = false, fpsT = 0, fpsN = 0;
+
+      // Section geometry is measured only occasionally (and on resize) instead of calling getBoundingClientRect()
+      // every frame, which forced a synchronous layout on each tick. Scroll progress = (scrollY - sectionTop) / (height - viewport).
+      let secTop = 0, secH = 1, vhC = 1, frameN = 0, lastHint = "", btnLanded: boolean | null = null;
+      const measure = () => {
+        const r = section.getBoundingClientRect();
+        secTop = r.top + window.scrollY; secH = r.height; vhC = window.innerHeight;
+      };
+      measure();
+      let rzRaf = 0;
+      const onResize = () => {
+        cancelAnimationFrame(rzRaf);
+        rzRaf = requestAnimationFrame(() => { sizeIt(); measure(); });
+      };
+      window.addEventListener("resize", onResize);
 
       // height of the boarding ramp under a point (0 everywhere else)
       const rampLift = (x: number, z: number) => {
@@ -2427,19 +2483,21 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       const tick = () => {
         if (!running) return;
         raf = requestAnimationFrame(tick);
+        if ((frameN++ & 31) === 0) measure();
         const rawDt = clock.getDelta();
-        const dt = Math.min(rawDt, 0.05), time = clock.elapsedTime, vh = window.innerHeight;
-        const r = section.getBoundingClientRect();
-        let tgt = clamp(-r.top / Math.max(1, r.height - vh), 0, 1);
+        const dt = Math.min(rawDt, 0.05), time = clock.elapsedTime;
+        let tgt = clamp((window.scrollY - secTop) / Math.max(1, secH - vhC), 0, 1);
         if (st.boarding) tgt = spLock;
         sp += (tgt - sp) * Math.min(1, dt * 5);
+
+        flushMove();
 
         // dynamic resolution: if the device struggles, quietly render fewer pixels
         if (W && rawDt < 0.25) {
           fpsT += rawDt; fpsN++;
           if (fpsN >= 40) {
             const avg = fpsT / fpsN; fpsT = 0; fpsN = 0;
-            if (avg > 0.036 && pr > 0.6) {
+            if (avg > 0.032 && pr > 0.6) {
               pr = Math.max(0.6, pr * 0.8);
               renderer.setPixelRatio(pr); starMat.uniforms.uPR.value = pr; sizeIt();
             }
@@ -2491,8 +2549,11 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
         atmoMat.uniforms.uA.value = atmoFade;
         ringMat.uniforms.uA.value = atmoFade;
         ring.visible = atmoFade > 0.005;
-        ring.rotation.z += dt * 0.01;
-        if (hint.current) hint.current.style.opacity = String(1 - clamp(ap * 8, 0, 1));
+        if (ring.visible) ring.rotation.z += dt * 0.01;
+        if (hint.current) {
+          const hv = (1 - clamp(ap * 8, 0, 1)).toFixed(3);
+          if (hv !== lastHint) { lastHint = hv; hint.current.style.opacity = hv; }
+        }
 
         // shooting star
         shoot.next -= dt;
@@ -2603,15 +2664,18 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
           const wd = host.clientWidth, h = host.clientHeight;
           const v = site.localToWorld(tmp.set(ANCHOR.x, ANCHOR.y + Math.sin(time * 2) * 0.06, ANCHOR.z)).project(cam);
           const px = clamp((v.x * 0.5 + 0.5) * wd, 90, wd - 90), py = clamp((-v.y * 0.5 + 0.5) * h, 70, h - 70);
-          btn.current.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
-          btn.current.style.opacity = st.landed ? "1" : "0";
-          btn.current.style.pointerEvents = st.landed ? "auto" : "none";
+          btn.current.style.transform = `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%)`;
+          if (btnLanded !== st.landed) {
+            btnLanded = st.landed;
+            btn.current.style.opacity = st.landed ? "1" : "0";
+            btn.current.style.pointerEvents = st.landed ? "auto" : "none";
+          }
         }
         renderer.render(scene, cam);
         if (!shown) { shown = true; host.classList.add("is-on"); }
       };
 
-      const run = () => { if (running || dead) return; running = true; clock.getDelta(); raf = requestAnimationFrame(tick); };
+      const run = () => { if (running || dead) return; running = true; measure(); clock.getDelta(); raf = requestAnimationFrame(tick); };
       const halt = () => { running = false; cancelAnimationFrame(raf); };
       // only render while the section is on screen (and never stop in the middle of a launch)
       let vis: IntersectionObserver | null = null;
@@ -2714,7 +2778,8 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
       return () => {
         dead = true;
         halt(); vis?.disconnect(); unlock();
-        window.removeEventListener("resize", sizeIt);
+        cancelAnimationFrame(rzRaf);
+        window.removeEventListener("resize", onResize);
         renderer.domElement.removeEventListener("pointerdown", onDown);
         renderer.domElement.removeEventListener("pointermove", onMove);
         renderer.domElement.removeEventListener("pointerleave", onLeave);
@@ -2793,7 +2858,7 @@ export default function CTASection({ startHref = "/contact", logoSrc = "/images/
             <label>
               Your country
               <span className="st-cta__select">
-                {code && <img src={`https://flagcdn.com/w40/${code.toLowerCase()}.png`} alt="" />}
+                {code && <img src={`https://flagcdn.com/w40/${code.toLowerCase()}.png`} alt="" decoding="async" />}
                 <select value={code} onChange={(e) => setCode(e.target.value)}>
                   <option value="">Select your country</option>
                   {countries.map((c) => (
