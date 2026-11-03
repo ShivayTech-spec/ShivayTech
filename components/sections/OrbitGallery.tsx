@@ -1,7 +1,7 @@
 "use client"
 
 import React, { Suspense, useEffect, useMemo, useRef, useState } from "react"
-import { Canvas, useFrame } from "@react-three/fiber"
+import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { OrbitControls, useTexture } from "@react-three/drei"
 import * as THREE from "three"
 
@@ -15,7 +15,13 @@ const TOTAL_SCROLL = SCROLL_DISTANCE + HOLD_DISTANCE + ZOOM_DISTANCE
 const TILT = 10 // degrees, top leans away from the viewer (negative = other way)
 
 // SIZE OF THE BIG CENTER CIRCLE (px) - change this one number to resize it
-const CENTER_SIZE = 340
+const CENTER_SIZE = 320
+
+// How far (fraction of hero height) the circle + orbit sit ABOVE the screen center, so the text/buttons fit under the circle.
+// Set to 0 to put everything back to the exact center.
+const STAGE_SHIFT = 0.12
+// Same thing, but for while the circle is opened (after scrolling): 0 = exact center, negative = lower than center.
+const STAGE_SHIFT_OPEN = 0
 
 // 3D tile settings
 const TILE_DEPTH = 0.01 // slab thickness
@@ -38,7 +44,7 @@ const DEFAULT_HERO_IMAGES: string[] = Array(30).fill("/images/sample1.png")
 const DEFAULT_CENTER_VIDEO = "/videos/circle.mp4"
 
 // Optional poster shown until the video loads (falls back to the dark gradient if empty/missing)
-const DEFAULT_CENTER_IMAGE = "/images/sample1.png"
+const DEFAULT_CENTER_IMAGE = "/images/hero.png"
 
 const PROFILES = [
   "/images/github.jpg",
@@ -246,7 +252,7 @@ function HeroImages({ images }: { images: string[] }) {
               <meshBasicMaterial
                 map={outerTex}
                 transparent
-                opacity={0.7}
+                opacity={0.85}
                 depthWrite={false}
                 blending={THREE.AdditiveBlending}
                 side={THREE.DoubleSide}
@@ -260,8 +266,8 @@ function HeroImages({ images }: { images: string[] }) {
                 color="#0b0e16"
                 metalness={0.4}
                 roughness={0.4}
-                emissive="#006eff"
-                emissiveIntensity={1.1}
+                emissive="#1a8cff"
+                emissiveIntensity={1.6}
               />
             </mesh>
 
@@ -366,10 +372,12 @@ function HeroScrollAnimation({ progress }: { progress: React.MutableRefObject<nu
 // Center section that sits inside the orbit (inline styles, no Tailwind needed)
 function HeroCenter({
   scrollY,
+  shift,
   centerImage,
   centerVideo,
 }: {
   scrollY: number
+  shift: number
   centerImage?: string
   centerVideo?: string
 }) {
@@ -402,6 +410,10 @@ function HeroCenter({
   const neon = (k: number) =>
     `0 0 25px rgba(0,110,255,${0.5 * k}), 0 0 60px rgba(0,110,255,${0.15 * k}), inset 0 0 30px rgba(0,110,255,${0.25 * k}), inset 0 2px 8px rgba(0,110,255,${0.4 * k})`
 
+  // brighter, controlled glow for the main emblem rim
+  const emblemGlow = (k: number) =>
+    `0 0 14px rgba(0,200,255,${0.9 * k}), 0 0 34px rgba(0,143,255,${0.7 * k}), 0 0 80px rgba(0,107,255,${0.4 * k}), inset 0 0 12px rgba(0,200,255,${0.5 * k})`
+
   const circleGradient =
     "radial-gradient(circle at 50% 35%, rgba(10,26,92,0.92) 0%, rgba(5,11,42,0.94) 60%, rgba(2,4,15,0.96) 100%)"
 
@@ -414,6 +426,7 @@ function HeroCenter({
         zIndex: 10,
         pointerEvents: "none",
         perspective: 1200,
+        transform: `translateY(${-shift * vp.h}px)`,
       }}
     >
       <div style={{ transform: `scale(${scale}) rotateX(${TILT * (1 - zoom)}deg)` }}>
@@ -448,9 +461,9 @@ function HeroCenter({
                 height: curH,
                 flexShrink: 0,
                 borderRadius: radius,
-                padding: 2 * (1 - ease),
-                background: "linear-gradient(135deg, #7aa7ff, #2f5bff, #4a2fd6)",
-                boxShadow: neon(fade),
+                padding: 3 * (1 - ease),
+                background: "linear-gradient(135deg, #b5ecff, #1a9bff, #006bff)",
+                boxShadow: emblemGlow(fade),
               }}
             >
               <div
@@ -547,6 +560,223 @@ function HeroCenter({
   )
 }
 
+// ---- Hero text, services pill and buttons, right under the center circle ----
+const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" } as const
+
+const SERVICES: { label: string; icon: React.ReactNode }[] = [
+  {
+    label: "Web Development",
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" {...stroke}>
+        <polyline points="8 6 2 12 8 18" />
+        <polyline points="16 6 22 12 16 18" />
+        <line x1="14" y1="4" x2="10" y2="20" />
+      </svg>
+    ),
+  },
+  {
+    label: "SEO",
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" {...stroke} strokeWidth={2.5}>
+        <line x1="5" y1="20" x2="5" y2="14" />
+        <line x1="10" y1="20" x2="10" y2="9" />
+        <line x1="15" y1="20" x2="15" y2="12" />
+        <line x1="20" y1="20" x2="20" y2="4" />
+      </svg>
+    ),
+  },
+  {
+    label: "Digital Marketing",
+    icon: (
+      <svg width="24" height="22" viewBox="0 0 24 24" {...stroke} strokeWidth={2.2} style={{ color: "#1a8cff" }}>
+        <path d="M6.5 8C3.5 8 2 11 2 12.5S3.5 17 6.5 17c3.5 0 5-5 5.5-5s2 5 5.5 5c3 0 4.5-3 4.5-4.5S20.5 8 17.5 8c-3.5 0-5 5-5.5 5S10 8 6.5 8z" />
+      </svg>
+    ),
+  },
+  {
+    label: "Web Maintenance",
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" {...stroke}>
+        <path d="M12 2 2 7l10 5 10-5-10-5z" />
+        <path d="M2 17l10 5 10-5" />
+        <path d="M2 12l10 5 10-5" />
+      </svg>
+    ),
+  },
+]
+
+// Prefixed with .hero-root so they beat the section rule that clears div backgrounds
+const HERO_CSS = `
+.hero-root .hero-services{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:clamp(18px,3vh,28px);padding:clamp(8px,1.2vh,12px) clamp(10px,1.4vw,26px);border-radius:999px;border:2px solid #1a8cff;background:rgba(2,8,23,.75);box-shadow:0 0 10px rgba(26,140,255,.9),0 0 28px rgba(0,107,255,.5),inset 0 0 14px rgba(0,143,255,.35)}
+.hero-root .hero-services-item{display:flex;align-items:center;gap:10px;padding:4px clamp(12px,1.4vw,26px);font-size:clamp(13px,.95vw,18px);font-weight:500;color:#fff;white-space:nowrap}
+.hero-root .hero-services-item + .hero-services-item{border-left:1px solid rgba(198,213,234,.3)}
+.hero-root .hero-cta-row{display:flex;flex-wrap:wrap;justify-content:center;gap:clamp(12px,1.2vw,22px);margin-top:clamp(12px,2vh,20px)}
+.hero-root .hero-btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:clamp(44px,6vh,58px);padding:0 clamp(24px,2.2vw,40px);border-radius:999px;font-size:clamp(14px,1vw,18px);font-weight:600;color:#fff;text-decoration:none;white-space:nowrap;cursor:pointer;transition:box-shadow .25s ease,transform .25s ease,border-color .25s ease}
+.hero-root .hero-btn-primary{background:linear-gradient(180deg,#2a9bff 0%,#0a6bff 50%,#0537c9 100%);border:2px solid #3fc8ff;box-shadow:0 0 12px rgba(0,200,255,.7),0 0 32px rgba(0,120,255,.65),0 0 70px rgba(0,80,255,.3),inset 0 1px 0 rgba(255,255,255,.45),inset 0 0 16px rgba(0,200,255,.35)}
+.hero-root .hero-btn-primary:hover{transform:translateY(-1px);border-color:#8fe6ff;box-shadow:0 0 16px rgba(0,220,255,.9),0 0 42px rgba(0,140,255,.8),0 0 90px rgba(0,80,255,.4),inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 20px rgba(0,200,255,.5)}
+.hero-root .hero-btn-secondary{background:rgba(2,6,20,.8);border:2px solid #2a86ff;box-shadow:0 0 12px rgba(26,140,255,.7),0 0 30px rgba(0,107,255,.35),inset 0 0 14px rgba(0,107,255,.3)}
+.hero-root .hero-btn-secondary:hover{transform:translateY(-1px);border-color:#5aa8ff;box-shadow:0 0 18px rgba(26,140,255,.9),0 0 40px rgba(0,107,255,.5),inset 0 0 18px rgba(0,107,255,.4)}
+@media (max-width:640px){
+.hero-root .hero-services{border-radius:22px}
+.hero-root .hero-services-item{padding:6px 12px}
+.hero-root .hero-services-item + .hero-services-item{border-left:none}
+.hero-root .hero-cta-row{gap:12px}
+}
+`
+
+function HeroContent({ scrollY, shift }: { scrollY: number; shift: number }) {
+  const [scale, setScale] = useState(1)
+
+  useEffect(() => {
+    const update = () => setScale(Math.min(1, window.innerWidth / 700))
+    update()
+    window.addEventListener("resize", update)
+    return () => window.removeEventListener("resize", update)
+  }, [])
+
+  // visible while the circle is closed; fades as soon as it starts opening (the profile cards fly out underneath)
+  const fade = 1 - Math.min(scrollY / (SCROLL_DISTANCE * 0.4), 1)
+
+  const gradText = (bg: string, glow: string): React.CSSProperties => ({
+    background: bg,
+    WebkitBackgroundClip: "text",
+    backgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    color: "transparent",
+    filter: glow,
+  })
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        // starts at the bottom edge of the (shifted) center circle and runs to the bottom of the hero
+        top: `calc(${(0.5 - shift) * 100}% + ${(CENTER_SIZE / 2) * scale}px)`,
+        bottom: 0,
+        zIndex: 20,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "flex-start",
+        textAlign: "center",
+        padding: "clamp(4px, 1vh, 12px) 20px 0",
+        fontFamily: "var(--font-montserrat, inherit)", // picks up Montserrat automatically if you load it with that variable
+        opacity: fade,
+        pointerEvents: "none",
+      }}
+    >
+      <style>{HERO_CSS}</style>
+
+      {/* headline */}
+      <div style={{ position: "relative" }}>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: "clamp(26px, min(2.8vw, 5.8vh), 56px)",
+            fontWeight: 800,
+            lineHeight: 1.08,
+            letterSpacing: "-0.01em",
+          }}
+        >
+          <span
+            style={{
+              display: "block",
+              ...gradText(
+                "linear-gradient(180deg, #ffffff 0%, #e6ecf7 40%, #8fa0bd 100%)",
+                "drop-shadow(0 2px 4px rgba(0,0,0,0.7)) drop-shadow(0 0 10px rgba(180,200,235,0.25))"
+              ),
+            }}
+          >
+            Web Solutions That
+          </span>
+          <span
+            style={{
+              display: "block",
+              fontStyle: "italic",
+              ...gradText(
+                "linear-gradient(180deg, #5cc3ff 0%, #1a8cff 45%, #006bff 100%)",
+                "drop-shadow(0 0 8px rgba(0,143,255,0.85)) drop-shadow(0 0 22px rgba(0,107,255,0.55))"
+              ),
+            }}
+          >
+            Grow Your Business.
+          </span>
+        </h1>
+        {/* thin illuminated underline */}
+        <svg
+          viewBox="0 0 400 20"
+          preserveAspectRatio="none"
+          style={{
+            position: "absolute",
+            left: "40%",
+            bottom: -14,
+            width: "48%",
+            height: 14,
+            filter: "drop-shadow(0 0 3px rgba(0,200,255,0.9)) drop-shadow(0 0 8px rgba(0,143,255,0.7))",
+          }}
+        >
+          <defs>
+            <linearGradient id="hero-swoosh" x1="0" x2="1" y1="0" y2="0">
+              <stop offset="0" stopColor="#008fff" stopOpacity="0" />
+              <stop offset="0.5" stopColor="#4db8ff" stopOpacity="1" />
+              <stop offset="1" stopColor="#008fff" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d="M0 14 Q 200 2 400 10" fill="none" stroke="url(#hero-swoosh)" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      </div>
+
+      {/* services pill */}
+      <div className="hero-services">
+        {SERVICES.map((sv) => (
+          <div key={sv.label} className="hero-services-item">
+            {sv.icon}
+            {sv.label}
+          </div>
+        ))}
+      </div>
+
+      {/* buttons */}
+      <div className="hero-cta-row" style={{ pointerEvents: fade > 0.1 ? "auto" : "none" }}>
+        <a href="#contact" className="hero-btn hero-btn-primary">
+          Get a Quote
+          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke}>
+            <line x1="5" y1="12" x2="19" y2="12" />
+            <polyline points="12 5 19 12 12 19" />
+          </svg>
+        </a>
+        <a href="#work" className="hero-btn hero-btn-secondary">
+          <svg width="18" height="18" viewBox="0 0 24 24" {...stroke}>
+            <polygon points="6 4 20 12 6 20 6 4" />
+          </svg>
+          See Our Work
+        </a>
+      </div>
+    </div>
+  )
+}
+
+// Shifts the 3D scene up on screen (without resizing it) so it lines up with the shifted center circle.
+// `shift` is the same animated value the circle uses, so the orbit and the circle always move together.
+function StageOffset({ shift }: { shift: React.MutableRefObject<number> }) {
+  const { camera, size } = useThree()
+  useFrame(() => {
+    const cam = camera as THREE.PerspectiveCamera
+    cam.setViewOffset(size.width, size.height, 0, size.height * shift.current, size.width, size.height)
+  })
+  useEffect(
+    () => () => {
+      const cam = camera as THREE.PerspectiveCamera
+      cam.clearViewOffset()
+      cam.updateProjectionMatrix()
+    },
+    [camera]
+  )
+  return null
+}
+
 export default function Hero({
   images = DEFAULT_HERO_IMAGES,
   centerImage = DEFAULT_CENTER_IMAGE,
@@ -566,6 +796,25 @@ export default function Hero({
   const [reduced, setReduced] = useState(false)
   const [count, setCount] = useState(1200)
   const [scrollY, setScrollY] = useState(0) // virtual px driving the animation
+
+  const stage = useRef(STAGE_SHIFT) // smoothed stage shift (fraction of hero height)
+  const [stageShift, setStageShift] = useState(STAGE_SHIFT)
+
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      const open = Math.min(virtual.current / SCROLL_DISTANCE, 1)
+      const target = STAGE_SHIFT + (STAGE_SHIFT_OPEN - STAGE_SHIFT) * open
+      const diff = target - stage.current
+      if (Math.abs(diff) > 0.0003) {
+        stage.current = Math.abs(diff) < 0.001 ? target : stage.current + diff * 0.12
+        setStageShift(stage.current)
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
 
   useEffect(() => {
     setReduced(window.matchMedia("(prefers-reduced-motion: reduce)").matches)
@@ -678,6 +927,8 @@ export default function Hero({
         gl={{ antialias: false, powerPreference: "high-performance", alpha: true }}
         onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
       >
+        <StageOffset shift={stage} />
+
         {/* lights for the 3D tile edges */}
         <ambientLight intensity={0.6} />
         <directionalLight position={[-10, 12, 10]} intensity={2.2} />
@@ -706,7 +957,8 @@ export default function Hero({
         />
       </Canvas>
 
-      <HeroCenter scrollY={scrollY} centerImage={centerImage} centerVideo={centerVideo} />
+      <HeroCenter scrollY={scrollY} shift={stageShift} centerImage={centerImage} centerVideo={centerVideo} />
+      <HeroContent scrollY={scrollY} shift={stageShift} />
     </section>
   )
 }

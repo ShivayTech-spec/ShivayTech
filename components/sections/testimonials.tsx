@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from "react";
 
 /* ------------------------------------------------------------------ */
@@ -24,23 +24,23 @@ type Review = {
 const REVIEWS: Review[] = [
   {
     id: 0,
-    name: "Client Name",
-    role: "Founder, Company",
+    name: "Aarav Mehta",
+    role: "Founder, Mehta Digital",
     text: "ShivayTech delivered our website ahead of schedule and the quality blew us away. Highly recommended!",
     rating: 5,
     fx: -0.31, fy: -0.27, mx: -0.16, my: -0.36, tilt: -4,
   },
   {
     id: 1,
-    name: "Client Name",
-    role: "CEO, Company",
+    name: "Emily Carter",
+    role: "CEO, Brightpath Studio",
     text: "Professional team, clean design and great communication from start to finish.",
     rating: 5,
     fx: 0.31, fy: -0.29, mx: 0.16, my: -0.22, tilt: 3,
   },
   {
     id: 2,
-    name: "Client Name",
+    name: "Priya Sharma",
     role: "Marketing Head",
     text: "Our traffic and leads went up after the redesign. The attention to detail is unreal.",
     rating: 5,
@@ -48,7 +48,7 @@ const REVIEWS: Review[] = [
   },
   {
     id: 3,
-    name: "Client Name",
+    name: "Rohan Verma",
     role: "Store Owner",
     text: "Fast, reliable and creative. They understood our idea and made it even better.",
     rating: 4,
@@ -56,7 +56,7 @@ const REVIEWS: Review[] = [
   },
   {
     id: 4,
-    name: "Client Name",
+    name: "Liam Tremblay",
     role: "Startup Founder",
     text: "From design to launch, everything was smooth. Support after delivery was excellent too.",
     rating: 5,
@@ -64,7 +64,7 @@ const REVIEWS: Review[] = [
   },
   {
     id: 5,
-    name: "Client Name",
+    name: "Ananya Iyer",
     role: "Business Owner",
     text: "Best decision we made for our brand. Great value and outstanding results.",
     rating: 5,
@@ -99,7 +99,8 @@ const pointInPoly = (x: number, y: number, poly: Pt[]) => {
 /* ------------------------------------------------------------------ */
 /*  Sound – synthesised with the Web Audio API (no audio files)        */
 /*  • a low cosmic hum while a review hovers over the galaxy           */
-/*  • a suction sweep + deep boom + sparkles when it gets swallowed    */
+/*  • a modern "warp whoosh + bloop + sub thump + chime" when a        */
+/*    review gets swallowed                                            */
 /* ------------------------------------------------------------------ */
 function createGalaxySound() {
   let ctx: AudioContext | null = null;
@@ -125,10 +126,10 @@ function createGalaxySound() {
       master.connect(comp);
       comp.connect(ctx.destination);
 
-      // synthetic "deep space" reverb tail
-      const len = Math.floor(ctx.sampleRate * 2.4);
-      const imp = ctx.createBuffer(2, len, ctx.sampleRate);
-      for (let ch = 0; ch < 2; ch++) {
+      // light synthetic reverb tail (short + mono = cheap to build, no hitch on first grab)
+      const len = Math.floor(ctx.sampleRate * 1.1);
+      const imp = ctx.createBuffer(1, len, ctx.sampleRate);
+      for (let ch = 0; ch < 1; ch++) {
         const d = imp.getChannelData(ch);
         for (let i = 0; i < len; i++) {
           d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.8);
@@ -141,7 +142,7 @@ function createGalaxySound() {
       reverb.connect(wet);
       wet.connect(master);
 
-      noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      noise = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate);
       const nd = noise.getChannelData(0);
       for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
     }
@@ -217,80 +218,65 @@ function createGalaxySound() {
       const nb = noise;
       if (!c || !m || !rv || !nb || muted) return;
       stopHover();
-      const t = c.currentTime;
+      const t = c.currentTime + 0.01;
 
       const out = c.createGain();
-      out.gain.value = 1;
+      out.gain.value = 0.9;
       out.connect(m);
       out.connect(rv);
 
-      /* 1. suction sweep: pitch + filter fall into the core */
-      const o = c.createOscillator();
-      o.type = "sawtooth";
-      o.frequency.setValueAtTime(700, t);
-      o.frequency.exponentialRampToValueAtTime(45, t + 0.75);
-      const lp = c.createBiquadFilter();
-      lp.type = "lowpass";
-      lp.Q.value = 6;
-      lp.frequency.setValueAtTime(3500, t);
-      lp.frequency.exponentialRampToValueAtTime(120, t + 0.75);
-      const og = c.createGain();
-      og.gain.setValueAtTime(0.0001, t);
-      og.gain.exponentialRampToValueAtTime(0.26, t + 0.05);
-      og.gain.exponentialRampToValueAtTime(0.0001, t + 0.85);
-      o.connect(lp);
-      lp.connect(og);
-      og.connect(out);
-      o.start(t);
-      o.stop(t + 0.9);
+      const tone = (
+        type: OscillatorType,
+        f0: number,
+        f1: number,
+        st: number,
+        dur: number,
+        peak: number
+      ) => {
+        const o = c.createOscillator();
+        o.type = type;
+        o.frequency.setValueAtTime(f0, st);
+        if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, st + dur);
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, st);
+        g.gain.exponentialRampToValueAtTime(peak, st + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.0001, st + dur);
+        o.connect(g);
+        g.connect(out);
+        o.start(st);
+        o.stop(st + dur + 0.02);
+      };
 
-      /* 2. air / dust whoosh */
+      /* 1. airy warp whoosh */
       const n = c.createBufferSource();
       n.buffer = nb;
       const bp = c.createBiquadFilter();
       bp.type = "bandpass";
-      bp.Q.value = 1.2;
-      bp.frequency.setValueAtTime(2400, t);
-      bp.frequency.exponentialRampToValueAtTime(180, t + 0.8);
+      bp.Q.value = 2;
+      bp.frequency.setValueAtTime(5200, t);
+      bp.frequency.exponentialRampToValueAtTime(420, t + 0.22);
       const ng = c.createGain();
       ng.gain.setValueAtTime(0.0001, t);
-      ng.gain.exponentialRampToValueAtTime(0.34, t + 0.12);
-      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+      ng.gain.exponentialRampToValueAtTime(0.2, t + 0.03);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
       n.connect(bp);
       bp.connect(ng);
       ng.connect(out);
       n.start(t);
-      n.stop(t + 1);
+      n.stop(t + 0.3);
 
-      /* 3. deep boom when it reaches the core */
-      const b = c.createOscillator();
-      b.type = "sine";
-      b.frequency.setValueAtTime(110, t + 0.3);
-      b.frequency.exponentialRampToValueAtTime(32, t + 1.4);
-      const bg = c.createGain();
-      bg.gain.setValueAtTime(0.0001, t + 0.3);
-      bg.gain.exponentialRampToValueAtTime(0.75, t + 0.34);
-      bg.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
-      b.connect(bg);
-      bg.connect(out);
-      b.start(t + 0.3);
-      b.stop(t + 1.7);
+      /* 2. glassy "bloop" sucking in */
+      tone("sine", 1500, 240, t, 0.17, 0.32);
 
-      /* 4. little star sparkles that bloom after the boom */
-      for (let i = 0; i < 7; i++) {
-        const st = t + 0.36 + i * 0.05 + Math.random() * 0.05;
-        const so = c.createOscillator();
-        so.type = "sine";
-        so.frequency.value = 1100 + Math.random() * 2600;
-        const sg = c.createGain();
-        sg.gain.setValueAtTime(0.0001, st);
-        sg.gain.exponentialRampToValueAtTime(0.045, st + 0.01);
-        sg.gain.exponentialRampToValueAtTime(0.0001, st + 0.5 + Math.random() * 0.4);
-        so.connect(sg);
-        sg.connect(out);
-        so.start(st);
-        so.stop(st + 1);
-      }
+      /* 3. tight sub thump */
+      tone("sine", 100, 40, t + 0.13, 0.4, 0.65);
+
+      /* 4. bright pentatonic chime (edit these notes to change the vibe) */
+      [659.25, 783.99, 987.77, 1318.51].forEach((f, i) => {
+        const st = t + 0.16 + i * 0.065;
+        tone("triangle", f, f, st, 0.55, 0.1);
+        tone("sine", f * 2, f * 2, st, 0.35, 0.035);
+      });
     },
 
     dispose() {
@@ -594,10 +580,10 @@ class Pts {
   }
 }
 
-function buildSets(gl: WebGLRenderingContext, lite: boolean): StarSet[] {
-  const k = lite ? 0.5 : 1;
+/** k = particle density: 1 = full quality, lower = fewer particles (weaker devices) */
+function buildSets(gl: WebGLRenderingContext, k: number): StarSet[] {
   const sets: StarSet[] = [];
-  const clumps = makeClumps(lite ? 260 : 520);
+  const clumps = makeClumps(k < 1 ? 260 : 520);
   const clump = () => inClump(clumps[(Math.random() * clumps.length) | 0]);
 
   const finish = (
@@ -1130,6 +1116,15 @@ function Galaxy({
     const rctx = ring.getContext("2d");
     if (!gl || !rctx) return;
 
+    /* ---- device tier: scale quality to the hardware ---- */
+    const lite = window.innerWidth < 700;
+    const cores = navigator.hardwareConcurrency || 4;
+    const mem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory || 4;
+    const weak = cores <= 4 || (lite && mem <= 4);
+    const density = weak ? 0.25 : lite ? 0.5 : 1;
+    const baseDpr = weak ? 0.75 : Math.min(window.devicePixelRatio || 1, lite ? 1.25 : 1.75);
+    let q = 1; // dynamic resolution multiplier – only ever goes down
+
     /* ---- programs ---- */
     const starProg = makeProgram(gl, VERT, FRAG, [
       "aR", "aTheta", "aY", "aSize", "aColor", "aAlpha", "aSeed",
@@ -1150,7 +1145,7 @@ function Galaxy({
     const U = {} as Record<(typeof UNIFORMS)[number], WebGLUniformLocation | null>;
     UNIFORMS.forEach((n) => (U[n] = gl.getUniformLocation(starProg, n)));
     const maxPt = (gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array)[1] || 64;
-    gl.uniform1f(U.uMaxPt, maxPt);
+    gl.uniform1f(U.uMaxPt, weak ? Math.min(maxPt, 48) : maxPt);
 
     const BU = brightProg ? uloc(brightProg, ["uTex", "uTexel", "uThresh", "uKnee"]) : {};
     const LU = blurProg ? uloc(blurProg, ["uTex", "uDir"]) : {};
@@ -1172,8 +1167,7 @@ function Galaxy({
     gl.disable(gl.DEPTH_TEST);
     gl.clearColor(0, 0, 0, 0);
 
-    const lite = window.innerWidth < 700;
-    const sets = buildSets(gl, lite);
+    const sets = buildSets(gl, density);
 
     /* ---- render targets for the bloom chain ---- */
     let scene: Target | null = null;
@@ -1226,9 +1220,14 @@ function Galaxy({
     let h = 0;
     let dpr = 1;
     const resize = () => {
-      dpr = Math.min(window.devicePixelRatio || 1, lite ? 1.5 : 2);
-      w = canvas.clientWidth;
-      h = canvas.clientHeight;
+      const nw = canvas.clientWidth;
+      const nh = canvas.clientHeight;
+      const nd = baseDpr * q;
+      // ignore no-op resizes (mobile URL bar show/hide fires "resize" while scrolling)
+      if (nw === w && nh === h && nd === dpr) return;
+      w = nw;
+      h = nh;
+      dpr = nd;
       canvas.width = Math.max(1, Math.floor(w * dpr));
       canvas.height = Math.max(1, Math.floor(h * dpr));
       ring.width = canvas.width;
@@ -1282,6 +1281,7 @@ function Galaxy({
     let glow = 0;
     let last = performance.now();
     let raf = 0;
+    let slow = 0;
     const fov = Math.PI / 4;
 
     const drawSet = (s: StarSet, boost: number) => {
@@ -1326,10 +1326,24 @@ function Galaxy({
       raf = requestAnimationFrame(frame);
       if (!visible) {
         last = now;
+        slow = 0;
         return;
       }
 
-      const dt = Math.min((now - last) / 1000, 0.05);
+      const ms = now - last;
+      if (weak && ms < 28) return; // cap weak devices at ~30fps = steady, no judder
+
+      // 20 slow frames in a row -> render fewer pixels (auto-adaptive resolution)
+      if (ms < 120) {
+        slow = ms > (weak ? 45 : 26) ? slow + 1 : 0;
+        if (slow >= 20 && q > 0.5) {
+          q = Math.max(0.5, q - 0.15);
+          slow = 0;
+          resize();
+        }
+      }
+
+      const dt = Math.min(ms / 1000, 0.05);
       last = now;
 
       const p = progressRef.current;
@@ -1415,13 +1429,17 @@ function Galaxy({
         bright(hA, qA, -1, 1);
         blur(qA, qB, 1.8 / qA.w, 0);
         blur(qB, qA, 0, 1.8 / qA.h);
-        blur(qA, qB, 2.6 / qA.w, 0);
-        blur(qB, qA, 0, 2.6 / qA.h);
+        if (!weak) {
+          blur(qA, qB, 2.6 / qA.w, 0);
+          blur(qB, qA, 0, 2.6 / qA.h);
+        }
         // anamorphic streak: only the very brightest points, smeared sideways
-        bright(sc, sA, hdr ? 2.2 : 0.85, hdr ? 2.0 : 0.15);
-        blur(sA, sB, 3 / sA.w, 0);
-        blur(sB, sA, 7 / sA.w, 0);
-        blur(sA, sB, 16 / sA.w, 0);
+        if (!weak) {
+          bright(sc, sA, hdr ? 2.2 : 0.85, hdr ? 2.0 : 0.15);
+          blur(sA, sB, 3 / sA.w, 0);
+          blur(sB, sA, 7 / sA.w, 0);
+          blur(sA, sB, 16 / sA.w, 0);
+        }
 
         // final grade -> screen
         toTarget(null, canvas.width, canvas.height);
@@ -1435,7 +1453,7 @@ function Galaxy({
         gl.uniform1i(CU.uBloom2, 2);
         gl.uniform1i(CU.uStreak, 3);
         gl.uniform1f(CU.uBloomAmt, (hdr ? 0.55 : 0.85) + boost * 0.7);
-        gl.uniform1f(CU.uStreakAmt, (hdr ? 0.5 : 0.35) + boost * 0.5);
+        gl.uniform1f(CU.uStreakAmt, weak ? 0 : (hdr ? 0.5 : 0.35) + boost * 0.5);
         gl.uniform1f(CU.uExpo, hdr ? 1.0 : 1.12);
         gl.uniform1f(CU.uTime, t);
         gl.uniform1f(CU.uFade, 1);
@@ -1456,7 +1474,7 @@ function Galaxy({
       rctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       rctx.clearRect(0, 0, w, h);
 
-      if (!reduced && it > 0.9) {
+      if (!reduced && !weak && it > 0.9) {
         nextShoot -= dt;
         if (nextShoot <= 0) {
           const ang = rand(0.25, 0.6);
@@ -1498,7 +1516,7 @@ function Galaxy({
         rctx.arc(s.x, s.y, 1.8, 0, Math.PI * 2);
         rctx.fillStyle = `rgba(255,255,255,${(a).toFixed(3)})`;
         rctx.shadowColor = "rgba(160,200,255,0.9)";
-        rctx.shadowBlur = 10;
+        rctx.shadowBlur = weak ? 0 : 10;
         rctx.fill();
         rctx.shadowBlur = 0;
       }
@@ -1512,7 +1530,7 @@ function Galaxy({
         rctx.strokeStyle = `rgba(110,180,255,${0.35 + 0.6 * glow})`;
         rctx.lineWidth = 2;
         rctx.shadowColor = "rgba(59,130,246,0.9)";
-        rctx.shadowBlur = 30 * glow;
+        rctx.shadowBlur = weak ? 0 : 30 * glow;
         rctx.stroke();
         rctx.shadowBlur = 0;
       }
@@ -1565,6 +1583,9 @@ function Galaxy({
   );
 }
 
+/** memoised so scroll / drag state updates never re-render the galaxy layer */
+const GalaxyLayer = memo(Galaxy);
+
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
@@ -1578,6 +1599,7 @@ export default function Testimonials() {
   const hitPolyRef = useRef<Pt[]>([]);
 
   const [p, setP] = useState(0);
+  const [near, setNear] = useState(false);
   const [size, setSize] = useState({ w: 1200, h: 800 });
   const [offsets, setOffsets] = useState<Record<number, { x: number; y: number }>>({});
   const [dismissed, setDismissed] = useState<number[]>([]);
@@ -1592,6 +1614,27 @@ export default function Testimonials() {
   const mobile = size.w < 700;
   const cardW = mobile ? 220 : 290;
   const galaxyR = Math.min(size.w, size.h) * 0.34;
+
+  /* ---- only create the galaxy (WebGL context + 100k particles) when the
+          section is about to scroll into view, so page load stays fast ---- */
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setNear(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([e]) => {
+        if (e.isIntersecting) {
+          setNear(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "800px 0px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   /* ---- sound: hum while hovering over the galaxy, cleanup on unmount ---- */
   useEffect(() => {
@@ -1620,8 +1663,10 @@ export default function Testimonials() {
       const rect = el.getBoundingClientRect();
       const total = el.offsetHeight - window.innerHeight;
       const v = total > 0 ? clamp(-rect.top / total) : 0;
+      const prev = progressRef.current;
       progressRef.current = v;
-      setP(v);
+      // skip tiny changes so React doesn't re-render for sub-pixel scroll
+      if (Math.abs(v - prev) > 0.0005 || v === 0 || v === 1) setP(v);
     };
     const onScroll = () => {
       if (!raf) raf = requestAnimationFrame(update);
@@ -1701,7 +1746,7 @@ export default function Testimonials() {
       // swallowed by the galaxy – hidden until the user scrolls back to the top
       setDismissed((prev) => (prev.includes(r.id) ? prev : [...prev, r.id]));
       flashRef.current = 1;
-      sound.swallow(); // 🔊 suction + boom + sparkles
+      sound.swallow(); // 🔊 warp whoosh + bloop + sub thump + chime
     }
     dragRef.current = null;
     hotRef.current = false;
@@ -1730,12 +1775,14 @@ export default function Testimonials() {
           ].join(","),
         }}
       >
-        <Galaxy
-          progressRef={progressRef}
-          hotRef={hotRef}
-          flashRef={flashRef}
-          hitPolyRef={hitPolyRef}
-        />
+        {near && (
+          <GalaxyLayer
+            progressRef={progressRef}
+            hotRef={hotRef}
+            flashRef={flashRef}
+            hitPolyRef={hitPolyRef}
+          />
+        )}
 
         {/* sound on / off */}
         <button
@@ -1755,10 +1802,8 @@ export default function Testimonials() {
             placeItems: "center",
             cursor: "pointer",
             color: "#93b4ff",
-            background: "rgba(4,10,32,0.6)",
+            background: "rgba(4,10,32,0.85)",
             border: "1px solid rgba(59,130,246,0.6)",
-            backdropFilter: "blur(8px)",
-            WebkitBackdropFilter: "blur(8px)",
           }}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1789,6 +1834,7 @@ export default function Testimonials() {
             pointerEvents: "none",
             opacity: clamp(0.35 + p * 2),
             padding: "0 16px",
+            willChange: "opacity",
           }}
         >
           <p
@@ -1853,9 +1899,9 @@ export default function Testimonials() {
                 userSelect: "none",
                 padding: mobile ? 14 : 18,
                 borderRadius: 18,
-                background: "rgba(4, 10, 32, 0.6)",
-                backdropFilter: "blur(10px)",
-                WebkitBackdropFilter: "blur(10px)",
+                // no backdrop-filter: re-blurring the animating galaxy behind every card
+                // every frame is a big cost on low-end GPUs. A denser tint looks the same.
+                background: "rgba(4, 10, 32, 0.82)",
                 border: "1px solid rgba(59,130,246,0.75)",
                 boxShadow: isDragging
                   ? "0 0 38px rgba(59,130,246,0.95), inset 0 0 18px rgba(59,130,246,0.35)"

@@ -7,13 +7,15 @@
  * Install:  npm i react-pageflip
  * Images:   put project screenshots in /public/images/  (names are in REASONS below)
  *
- * v9: - FIX: every screenshot is shown in full (object-fit: contain) inside the browser frame,
- *            a blurred copy of the same image fills any empty space (no bars, no cropping)
- *     - FIX: the screenshot frame takes the space that is left on the page, so it is never
- *            squashed and the placeholder text is never clipped
- *     - FIX: all six image paths now use /images/ (the old Shivay Fashion path used /work/)
- *     - FIX: images that fail before React attaches onError now fall back to the placeholder
- *     - everything from v8 is kept (book, flip controller, glowing star, people, animations)
+ * v10 (this version)
+ *  - LAPTOPS: every laptop now shows its screen (browser / code editor / dashboard, tinted with the
+ *             person's colour), with bezel, webcam, glare, a metal lip and a glow on the table
+ *  - TABLE:   recoloured to the site theme (deep navy glass, electric-blue neon rim, icy highlights)
+ *  - SPEED:   no SVG blur filters anywhere in the scene (they were re-rendered every frame),
+ *             keyboard is one pattern instead of ~130 rects, only the active person animates,
+ *             no backdrop-filter / drop-shadow filter on the book, fewer animated stars,
+ *             automatic "lite" mode on weak devices, polling stops when the section is off-screen
+ *  - everything else from v9 is kept (book, flip controller, glowing star, people, animations)
  */
 
 import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -183,10 +185,7 @@ function Star({ size = 40 }: { size?: number }) {
           <stop offset="1" stopColor="#2f6bff" />
         </linearGradient>
       </defs>
-      <path
-        d="M0,-46 C5,-14 14,-5 46,0 C14,5 5,14 0,46 C-5,14 -14,5 -46,0 C-14,-5 -5,-14 0,-46Z"
-        fill="url(#wwuStarG)"
-      />
+      <path d={STAR_D} fill="url(#wwuStarG)" />
     </svg>
   );
 }
@@ -424,22 +423,17 @@ const BookCover = memo(function BookCover({ kind }: { kind: "front" | "back" }) 
   );
 });
 
-/* ───────────────────────── PEOPLE (top-down, realistic) ───────────────────────── */
+/* ───────────────────────── PEOPLE (top-down, light-weight) ───────────────────────── */
 
 /* @@PERSON_START */
 
 /**
- * PEOPLE v4: realistic top-down figures, chair and laptop.
- * Drop-in: replace everything from the PERSON_START marker to the PERSON_END marker
- * in WhyWorkWithUs.tsx with this file's content. Nothing else has to change.
+ * PEOPLE v5: same people, chair and laptop, but built to render fast:
+ *  - no blur filters (soft shadows are plain radial gradients)
+ *  - keyboard = one repeating pattern, chair weave removed, fewer decorative nodes
+ *  - laptop SCREEN IS NOW VISIBLE: a lit display with UI content, bezel, webcam and glare
+ *  - only the active person animates (see CSS)
  */
-
-/* optional extras on top of Look, so the REASONS data needs no type change */
-type LookX = Look & {
-  sleeves?: "rolled" | "long"; // default "rolled" (bare forearms)
-  watch?: boolean; // smart watch on the left wrist
-  kara?: boolean; // steel kara on the right wrist
-};
 
 /* colour helpers (6-digit hex only) */
 function mix(a: string, b: string, t: number) {
@@ -491,7 +485,7 @@ function taper(x1: number, y1: number, x2: number, y2: number, r1: number, r2: n
   );
 }
 
-/** A round limb with cylinder shading across its width (dark edges, soft highlight). */
+/** A round limb with cylinder shading across its width. */
 function Limb({
   a,
   b,
@@ -518,17 +512,15 @@ function Limb({
   );
 }
 
-/** Small stylesheet used only by the people (finger tapping, blinking). */
+/** Person-only stylesheet: blinking (active person only). */
 const PERSON_CSS = `
-.wwu-fg{animation:none}
-.wwu-person.on .wwu-fg{animation:wwuTap .36s ease-in-out infinite}
-@keyframes wwuTap{0%,100%{transform:translateY(0)}50%{transform:translateY(1.7px)}}
-.wwu-eyes{transform-box:fill-box;transform-origin:center;animation:wwuBlink 5.2s infinite}
+.wwu-eyes{transform-box:fill-box;transform-origin:center}
+.wwu-person.on .wwu-eyes{animation:wwuBlink 5.2s infinite}
 @keyframes wwuBlink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.08)}}
-@media (prefers-reduced-motion:reduce){.wwu-person.on .wwu-fg,.wwu-eyes{animation:none}}
+@media (prefers-reduced-motion:reduce){.wwu-person.on .wwu-eyes{animation:none}}
 `;
 
-/** Shared gradients and filters. Rendered once inside the scene's <defs>. */
+/** Shared gradients and patterns. Rendered once inside the scene's <defs>. NO filters on purpose. */
 function PersonDefs() {
   return (
     <>
@@ -538,7 +530,6 @@ function PersonDefs() {
         <stop offset="0.55" stopColor="#000" stopOpacity="0" />
         <stop offset="1" stopColor="#000" stopOpacity="1" />
       </radialGradient>
-      {/* warm edge for skin: reads as blood under the skin, not grey */}
       <radialGradient id="wwuLoSkin" cx="50%" cy="45%" r="62%">
         <stop offset="0.5" stopColor="#3a0f06" stopOpacity="0" />
         <stop offset="1" stopColor="#3a0f06" stopOpacity="1" />
@@ -547,6 +538,12 @@ function PersonDefs() {
       <radialGradient id="wwuHi" cx="50%" cy="80%" r="58%">
         <stop offset="0" stopColor="#fff" stopOpacity="1" />
         <stop offset="1" stopColor="#fff" stopOpacity="0" />
+      </radialGradient>
+      {/* soft shadow without a blur filter */}
+      <radialGradient id="wwuShadow" cx="50%" cy="50%" r="50%">
+        <stop offset="0" stopColor="#000" stopOpacity="0.62" />
+        <stop offset="0.6" stopColor="#000" stopOpacity="0.28" />
+        <stop offset="1" stopColor="#000" stopOpacity="0" />
       </radialGradient>
       <radialGradient id="wwuScreen" cx="50%" cy="30%" r="70%">
         <stop offset="0" stopColor="#6fa3ff" stopOpacity="0.55" />
@@ -557,7 +554,6 @@ function PersonDefs() {
         <stop offset="0" stopColor="#9cc4ff" stopOpacity="0.4" />
         <stop offset="1" stopColor="#9cc4ff" stopOpacity="0" />
       </radialGradient>
-      {/* across-the-limb shading for arms */}
       <linearGradient id="wwuCyl" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stopColor="#000" stopOpacity="0.5" />
         <stop offset="0.3" stopColor="#000" stopOpacity="0" />
@@ -572,22 +568,15 @@ function PersonDefs() {
       </linearGradient>
       {/* brushed aluminium for the laptop */}
       <linearGradient id="wwuAlu" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stopColor="#b3bdd2" />
-        <stop offset="0.45" stopColor="#8390aa" />
-        <stop offset="1" stopColor="#566179" />
+        <stop offset="0" stopColor="#c4cde0" />
+        <stop offset="0.45" stopColor="#8f9bb4" />
+        <stop offset="1" stopColor="#5b667e" />
       </linearGradient>
-      {/* fine fabric weave for the chair */}
-      <pattern id="wwuWeave" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-        <rect width="3" height="3" fill="none" />
-        <line x1="0" y1="0" x2="0" y2="3" stroke="#fff" strokeOpacity="0.07" strokeWidth="1" />
-        <line x1="1.5" y1="0" x2="1.5" y2="3" stroke="#000" strokeOpacity="0.08" strokeWidth="0.7" />
+      {/* the whole keyboard is ONE repeating key tile */}
+      <pattern id="wwuKeys" x="-44.4" y="112.6" width="6.35" height="5.1" patternUnits="userSpaceOnUse">
+        <rect x="0.4" y="0.4" width="5.4" height="4.2" rx="0.9" fill="#1a2234" stroke="#33405e" strokeWidth="0.3" />
+        <rect x="0.8" y="0.7" width="4.6" height="0.7" rx="0.35" fill="#fff" opacity="0.08" />
       </pattern>
-      <filter id="wwuSoft" x="-40%" y="-40%" width="180%" height="180%">
-        <feGaussianBlur stdDeviation="7" />
-      </filter>
-      <filter id="wwuSoft2" x="-30%" y="-30%" width="160%" height="160%">
-        <feGaussianBlur stdDeviation="1.8" />
-      </filter>
     </>
   );
 }
@@ -615,25 +604,6 @@ function Shaded({
   );
 }
 
-/* laptop keyboard: 5 rows (function row, 3 main rows, bottom row with a space bar) */
-const KEYROWS = (() => {
-  const out: { x: number; y: number; w: number; h: number }[] = [];
-  const P = 6.35;
-  const x0 = -44.4;
-  for (let r = 0; r < 5; r++) {
-    const y = r === 0 ? 112.6 : 116.6 + (r - 1) * 5.1;
-    const h = r === 0 ? 3.4 : 4.2;
-    if (r < 4) {
-      for (let c = 0; c < 14; c++) out.push({ x: x0 + c * P, y, w: 5.4, h });
-    } else {
-      for (let c = 0; c < 4; c++) out.push({ x: x0 + c * P, y, w: 5.4, h });
-      out.push({ x: x0 + 4 * P, y, w: 38, h });
-      for (let c = 0; c < 4; c++) out.push({ x: x0 + 4 * P + 38 + 0.95 + c * P, y, w: 5.4, h });
-    }
-  }
-  return out.map((k) => ({ x: n2(k.x), y: n2(k.y), w: k.w, h: k.h }));
-})();
-
 /* chair: five-star base (angle in degrees, leg length) */
 const CHAIR_LEGS = (
   [
@@ -657,11 +627,13 @@ const BACK_OUT =
   "M -66 -40 C -70 -98 70 -98 66 -40 C 66 -30 62 -22 58 -20 C 52 -56 -52 -56 -58 -20 C -62 -22 -66 -30 -66 -40 Z";
 const BACK_PAD =
   "M -59 -41 C -62 -90 62 -90 59 -41 C 58 -35 55 -30 52 -28 C 47 -51 -47 -51 -52 -28 C -55 -30 -58 -35 -59 -41 Z";
-const BACK_RIBS = [-42, -28, -14, 0, 14, 28, 42].map((x) => {
-  const yi = -45.3 + 17.3 * (x / 52) ** 2 - 1;
-  const yo = -77.8 + 36.8 * (x / 59) ** 2 + 1;
-  return { x, y1: n2(yi), y2: n2(yo) };
-});
+const BACK_RIBS = [-42, -28, -14, 0, 14, 28, 42]
+  .map((x) => {
+    const yi = -45.3 + 17.3 * (x / 52) ** 2 - 1;
+    const yo = -77.8 + 36.8 * (x / 59) ** 2 + 1;
+    return `M ${x} ${n2(yi)} L ${x} ${n2(yo)}`;
+  })
+  .join(" ");
 
 /* body + hair geometry */
 const TORSO =
@@ -673,7 +645,6 @@ const HAIR_CAP_LONG =
 const HAIRLINE = "M -22.5 11 C -17 8.5 -9 10.5 0 12.5 C 9 10.5 17 8.5 22.5 11";
 const BEARD =
   "M -25 10 C -27 34 -19 56 0 58 C 19 56 27 34 25 10 C 23 18 20 26 17 31 C 11 34.5 6 36 0 36 C -6 36 -11 34.5 -17 31 C -20 26 -23 18 -25 10 Z";
-/* egg-shaped head: wide cranium, tapering jaw and chin */
 const FACE =
   "M -25 4 C -25.5 -17 -13 -23 0 -23 C 13 -23 25.5 -17 25 4 C 25 20 21 36 14 47 C 9 53.5 -9 53.5 -14 47 C -21 36 -25 20 -25 4 Z";
 const BROW = "M -3 24.8 C -7 21.8 -15 21.2 -21 25.6 C -15 23.8 -8.5 24.4 -3.4 28.2 Z";
@@ -704,14 +675,14 @@ function Person({ look }: { look: Look }) {
     sleeves = "rolled",
     watch,
     kara,
-  } = look as LookX;
+  } = look;
 
   const shirtD = darken(shirt, 0.38);
   const shirtL = lighten(shirt, 0.3);
   const skinD = darken(skin, 0.25);
   const skinDD = darken(skin, 0.42);
   const skinL = lighten(skin, 0.2);
-  const skinW = mix(skin, "#c2463a", 0.2); // warm: ears, cheeks
+  const skinW = mix(skin, "#c2463a", 0.2);
   const lipC = mix(skin, "#a83c3c", 0.5);
   const hairL = lighten(hair, 0.34);
   const hairD = darken(hair, 0.35);
@@ -726,43 +697,42 @@ function Person({ look }: { look: Look }) {
 
   /* everything random is generated once from a seed (same on server and client) */
   const gen = useMemo(() => {
-    const r = rng(hash(`${shirt}${hair}${skin}${hairStyle}`));
+    const id = hash(`${shirt}${hair}${skin}${hairStyle}`);
+    const r = rng(id);
     const jit = (a: number) => (r() - 0.5) * 2 * a;
     const out = {
+      id,
       tilt: jit(4.5),
       blink: n2(r() * 4),
       jL: { ex: jit(4), ey: jit(4), wx: jit(2.5), wy: jit(3), rot: -24 + jit(4) },
       jR: { ex: jit(4), ey: jit(4), wx: jit(2.5), wy: jit(3), rot: -24 + jit(4) },
-      fd: Array.from({ length: 2 }, () =>
-        Array.from({ length: 5 }, () => ({ d: n2(r() * 0.5), t: n2(0.3 + r() * 0.25) }))
-      ),
-      armHair: Array.from({ length: 16 }, () => ({ t: n2(0.25 + r() * 0.7), o: n2(jit(0.8)), a: n2(jit(35)), l: n2(1.2 + r() * 0.9) })),
+      variant: id % 3, // which screen this person is looking at
+      code: Array.from({ length: 8 }, () => ({
+        x: n2((r() < 0.4 ? 4 : 0) + (r() < 0.2 ? 4 : 0)),
+        w: n2(10 + r() * 32),
+        c: Math.floor(r() * 4),
+      })),
+      bars: Array.from({ length: 6 }, () => n2(5 + r() * 15)),
       strands: [] as { d: string; l: boolean; w: number }[],
-      fly: [] as string[],
       blobs: [] as { x: number; y: number; r: number; t: number }[],
       dots: [] as { x: number; y: number }[],
-      beardS: [] as string[],
     };
 
     if (hairStyle === "short") {
-      for (let k = 0; k < 40; k++) {
-        const a = (k / 40) * Math.PI * 2 + jit(0.15);
+      for (let k = 0; k < 26; k++) {
+        const a = (k / 26) * Math.PI * 2 + jit(0.15);
         const rr = 0.55 + r() * 0.42;
         const ex = Math.cos(a) * 24 * rr;
         const ey = -7 + Math.sin(a) * 19 * rr;
         const sw = jit(4);
         const mx = (2 + ex) / 2 - Math.sin(a) * sw;
         const my = (-9 + ey) / 2 + Math.cos(a) * sw;
-        out.strands.push({
-          d: `M 2 -9 Q ${n2(mx)} ${n2(my)} ${n2(ex)} ${n2(ey)}`,
-          l: k % 2 === 0,
-          w: n2(0.6 + r() * 0.5),
-        });
+        out.strands.push({ d: `M 2 -9 Q ${n2(mx)} ${n2(my)} ${n2(ex)} ${n2(ey)}`, l: k % 2 === 0, w: n2(0.6 + r() * 0.5) });
       }
     }
     if (hairStyle === "bun") {
-      for (let k = 0; k < 30; k++) {
-        const x = -21 + (k / 29) * 42 + jit(1);
+      for (let k = 0; k < 20; k++) {
+        const x = -21 + (k / 19) * 42 + jit(1);
         const y0 = 9 - Math.abs(x) * 0.18 + jit(1);
         out.strands.push({
           d: `M ${n2(x)} ${n2(y0)} Q ${n2(x * 0.75)} ${n2((y0 - 26) / 2 + jit(3))} ${n2(x * 0.35)} -26`,
@@ -772,9 +742,9 @@ function Person({ look }: { look: Look }) {
       }
     }
     if (hairStyle === "long") {
-      for (let k = 0; k < 22; k++) {
+      for (let k = 0; k < 14; k++) {
         const s = k % 2 ? 1 : -1;
-        const yi = -24 + (k / 21) * 34 + jit(1.5);
+        const yi = -24 + (k / 13) * 34 + jit(1.5);
         const ex = s * (23 + r() * 4);
         const ey = Math.min(24, yi + 14 + r() * 8);
         const cx = s * (9 + r() * 7);
@@ -785,28 +755,15 @@ function Person({ look }: { look: Look }) {
         });
       }
     }
-    if (hairStyle === "short" || hairStyle === "bun" || hairStyle === "long") {
-      for (let k = 0; k < 5; k++) {
-        const a = Math.PI * (1.08 + r() * 0.84);
-        const sx = Math.cos(a) * 25;
-        const sy = -7 + Math.sin(a) * 19.5;
-        const L = 3 + r() * 5;
-        const ex = sx + Math.cos(a) * L + jit(2);
-        const ey = sy + Math.sin(a) * L + jit(2);
-        out.fly.push(
-          `M ${n2(sx)} ${n2(sy)} Q ${n2((sx + ex) / 2 + jit(2))} ${n2((sy + ey) / 2 + jit(2))} ${n2(ex)} ${n2(ey)}`
-        );
-      }
-    }
     if (hairStyle === "curly") {
-      for (let k = 0; k < 30; k++) {
-        const a = (k / 30) * Math.PI * 2 + jit(0.1);
+      for (let k = 0; k < 24; k++) {
+        const a = (k / 24) * Math.PI * 2 + jit(0.1);
         const rr = 0.8 + r() * 0.22;
         const y = -7 + Math.sin(a) * 24 * rr;
         if (y > 13) continue;
         out.blobs.push({ x: n2(Math.cos(a) * 24 * rr), y: n2(y), r: n2(9 + r() * 3), t: r() });
       }
-      for (let k = 0; k < 22; k++) {
+      for (let k = 0; k < 12; k++) {
         const a = r() * Math.PI * 2;
         const rad = r() * 17;
         const y = -8 + Math.sin(a) * rad * 0.95;
@@ -815,72 +772,35 @@ function Person({ look }: { look: Look }) {
       }
     }
     if (hairStyle === "buzz") {
-      for (let k = 0; k < 120; k++) {
+      for (let k = 0; k < 50; k++) {
         const a = r() * Math.PI * 2;
         const rad = Math.sqrt(r());
         out.dots.push({ x: n2(Math.cos(a) * 24 * rad), y: n2(-7 + Math.sin(a) * 18 * rad) });
       }
     }
-    if (beard) {
-      for (let k = 0; k < 34; k++) {
-        const t = r() * 2 - 1;
-        const x = t * 22;
-        const yi = 31 + 5 * (1 - t * t);
-        const yo = 58 - 16 * t * t;
-        const y = yi + (yo - yi) * r();
-        out.beardS.push(
-          `M ${n2(x)} ${n2(y)} q ${n2(jit(1.2))} ${n2(2 + r() * 2)} ${n2(jit(1.5) + x * 0.04)} ${n2(3 + r() * 3)}`
-        );
-      }
-    }
     return out;
-  }, [shirt, hair, skin, hairStyle, beard]);
+  }, [shirt, hair, skin, hairStyle]);
+
+  const sid = `wwuSg${gen.id}`; // per-person screen gradients
 
   /* ───────── hands ───────── */
-  const digit = (pts: [number, number][], w: number, key: string, fx: { d: number; t: number }) => {
-    const segs = pts.slice(1).map((p, i) => ({ a: pts[i], b: p, w: w * (1 - 0.08 * i) }));
-    const line = (s: { a: [number, number]; b: [number, number] }) =>
-      `M ${n2(s.a[0])} ${n2(s.a[1])} L ${n2(s.b[0])} ${n2(s.b[1])}`;
+  const finger = (pts: [number, number][], w: number, key: string) => {
+    const d = pts.map((p, i) => `${i ? "L" : "M"} ${n2(p[0])} ${n2(p[1])}`).join(" ");
     const tip = pts[pts.length - 1];
     return (
-      <g key={key} className="wwu-fg" style={{ animationDelay: `${fx.d}s`, animationDuration: `${fx.t}s` }}>
-        <g stroke={skinD} strokeLinecap="round" fill="none">
-          {segs.map((s, i) => (
-            <path key={i} d={line(s)} strokeWidth={s.w + 1.1} />
-          ))}
-        </g>
-        <g stroke={skin} strokeLinecap="round" fill="none">
-          {segs.map((s, i) => (
-            <path key={i} d={line(s)} strokeWidth={s.w} />
-          ))}
-        </g>
-        <g stroke={skinL} strokeOpacity={0.35} strokeLinecap="round" fill="none" transform={`translate(${-w * 0.16} 0)`}>
-          {segs.map((s, i) => (
-            <path key={i} d={line(s)} strokeWidth={s.w * 0.26} />
-          ))}
-        </g>
-        {/* joint creases + nail */}
-        {pts.slice(1, -1).map((p, i) => (
-          <path
-            key={i}
-            d={`M ${n2(p[0] - w * 0.3)} ${n2(p[1])} Q ${n2(p[0])} ${n2(p[1] + 0.9)} ${n2(p[0] + w * 0.3)} ${n2(p[1])}`}
-            stroke={skinDD}
-            strokeOpacity={0.4}
-            strokeWidth={0.6}
-            fill="none"
-          />
-        ))}
-        <ellipse cx={tip[0]} cy={tip[1] - 1.7} rx={w * 0.32} ry={2} fill={lighten(skin, 0.5)} opacity={0.72} />
+      <g key={key} fill="none" strokeLinecap="round" strokeLinejoin="round">
+        <path d={d} stroke={skinD} strokeWidth={w + 1.1} />
+        <path d={d} stroke={skin} strokeWidth={w} />
+        <path d={d} stroke={skinL} strokeOpacity={0.3} strokeWidth={w * 0.26} transform={`translate(${n2(-w * 0.16)} 0)`} />
+        <ellipse cx={tip[0]} cy={tip[1] - 1.7} rx={w * 0.32} ry={2} fill={lighten(skin, 0.5)} opacity={0.7} stroke="none" />
       </g>
     );
   };
 
-  const hand = (fd: { d: number; t: number }[]) => (
+  const hand = (
     <>
-      {/* wrist blends into the palm */}
       <ellipse cx={0} cy={0} rx={8.4} ry={3.6} fill={skin} />
-      {/* thumb (3 joints) sits behind the palm, fingers (3 joints) behind the knuckle line */}
-      {digit(
+      {finger(
         [
           [7.5, 5],
           [15, 12.5],
@@ -888,11 +808,10 @@ function Person({ look }: { look: Look }) {
           [19.6, 27],
         ],
         7.2,
-        "th",
-        fd[4]
+        "th"
       )}
       {FINGERS.map((f, i) =>
-        digit(
+        finger(
           [
             [f.x, 22.5],
             [f.x + f.bx * 0.6, 22.5 + f.len * 0.4],
@@ -900,21 +819,11 @@ function Person({ look }: { look: Look }) {
             [f.x + f.bx * 1.7, 22.5 + f.len * 0.9],
           ],
           f.w,
-          `f${i}`,
-          fd[i]
+          `f${i}`
         )
       )}
       <Shaded edge="wwuLoSkin" shape={<path d={PALM} />} fill={skin} hi={0.16} lo={0.4} />
-      <g stroke={skinDD} strokeOpacity={0.28} strokeWidth={0.7} strokeLinecap="round" fill="none">
-        <path d="M -8 4 L -9.2 21" />
-        <path d="M -3 3 L -3.4 22" />
-        <path d="M 3 3 L 3 22" />
-        <path d="M 8 4 L 8.8 21" />
-      </g>
-      {FINGERS.map((f, i) => (
-        <ellipse key={i} cx={f.x} cy={23.8} rx={f.w * 0.55} ry={2.6} fill={skinL} opacity={0.36} />
-      ))}
-      <ellipse cx={8} cy={9} rx={5} ry={7} fill="#fff" opacity={0.07} />
+      <path d="M -8 4 L -9.2 21 M -3 3 L -3.4 22 M 3 3 L 3 22 M 8 4 L 8.8 21" stroke={skinDD} strokeOpacity={0.28} strokeWidth={0.7} strokeLinecap="round" fill="none" />
       <ellipse className="wwu-glow" cx={0} cy={22} rx={15} ry={12} fill="url(#wwuFace)" />
     </>
   );
@@ -922,105 +831,62 @@ function Person({ look }: { look: Look }) {
   /* ───────── arms (drawn for the left side, mirrored for the right) ───────── */
   const arm = (mirror: boolean) => {
     const j = mirror ? gen.jR : gen.jL;
-    const fd = gen.fd[mirror ? 1 : 0];
     const S: [number, number] = [-55, 4];
     const E: [number, number] = [-63 + j.ex, 57 + j.ey];
     const W: [number, number] = [-32 + j.wx, 98 + j.wy];
 
-    /* upper arm with a slight bicep bow */
-    const sx = E[0] - S[0];
-    const sy = E[1] - S[1];
-    const sl = Math.hypot(sx, sy);
-    const angS = (Math.atan2(sy, sx) * 180) / Math.PI;
-    const U: [number, number] = [S[0] + sx * 0.5 - (sy / sl) * 2.4, S[1] + sy * 0.5 + (sx / sl) * 2.4];
-
-    /* forearm */
     const dx = W[0] - E[0];
     const dy = W[1] - E[1];
     const fl = Math.hypot(dx, dy);
     const ux = dx / fl;
     const uy = dy / fl;
-    const nx = -uy; // points to the outer (little-finger) side
-    const ny = ux;
     const ang = (Math.atan2(dy, dx) * 180) / Math.PI;
     const at = (t: number): [number, number] => [E[0] + dx * t, E[1] + dy * t];
-    const P = (t: number, off: number): [number, number] => [E[0] + dx * t + nx * off, E[1] + dy * t + ny * off];
-    const pt = (p: [number, number]) => `${n2(p[0])} ${n2(p[1])}`;
     const back = (d: number): [number, number] => [W[0] - ux * d, W[1] - uy * d];
     const rolled = sleeves === "rolled";
-    const F = at(0.3); // widest part of the forearm
-    const bone = P(0.95, 5.2);
     const wristFrame = `translate(${n2(W[0])} ${n2(W[1])}) rotate(${n2(ang)})`;
 
     return (
       <g transform={mirror ? "scale(-1 1)" : undefined}>
-        {/* shadow on the table + shadow of the arm on the torso */}
-        <g opacity={0.35} filter="url(#wwuSoft2)" transform="translate(3 6)">
+        {/* soft shadow on the table */}
+        <g opacity={0.22} transform="translate(3 6)">
           <path d={taper(S[0], S[1], E[0], E[1], 12.5, 10.5)} fill="#000" />
           <path d={taper(E[0], E[1], W[0], W[1], 9.5, 7)} fill="#000" />
         </g>
-        <ellipse cx={-43} cy={16} rx={7} ry={17} fill="#000" opacity={0.28} filter="url(#wwuSoft2)" />
 
         {/* forearm */}
         {rolled ? (
           <>
-            <Limb a={E} b={F} r1={9.2} r2={9.6} fill={skin} />
-            <Limb a={F} b={W} r1={9.6} r2={6.8} fill={skin} />
-            {/* muscle ridge, shadow line, vein, tendons, wrist bone, fine arm hair */}
-            <path d={`M ${pt(P(0.4, 3))} L ${pt(P(0.95, 1.5))}`} stroke={lighten(skin, 0.3)} strokeOpacity={0.22} strokeWidth={2.2} strokeLinecap="round" />
-            <path d={`M ${pt(P(0.4, -3.5))} L ${pt(P(0.95, -2))}`} stroke={skinDD} strokeOpacity={0.2} strokeWidth={1.6} strokeLinecap="round" />
-            <path d={`M ${pt(P(0.9, -1.2))} Q ${pt(P(0.7, -2.6))} ${pt(P(0.5, -1.4))}`} stroke={mix(skin, "#4a5c8a", 0.55)} strokeOpacity={0.2} strokeWidth={1.1} fill="none" strokeLinecap="round" />
-            <g stroke={skinDD} strokeOpacity={0.2} strokeWidth={0.6} strokeLinecap="round">
-              <path d={`M ${pt(P(0.98, 1.6))} L ${pt(P(0.8, 1.9))}`} />
-              <path d={`M ${pt(P(0.98, -1.6))} L ${pt(P(0.8, -1.9))}`} />
-            </g>
-            <circle cx={bone[0]} cy={bone[1]} r={2} fill={lighten(skin, 0.1)} opacity={0.5} stroke={skinDD} strokeOpacity={0.3} strokeWidth={0.5} />
-            {gen.armHair.map((h, i) => {
-              const q = P(h.t, h.o * 8);
-              const a = ((ang + h.a) * Math.PI) / 180;
-              return (
-                <line key={i} x1={n2(q[0])} y1={n2(q[1])} x2={n2(q[0] + Math.cos(a) * h.l)} y2={n2(q[1] + Math.sin(a) * h.l)} stroke={hairD} strokeOpacity={0.35} strokeWidth={0.45} strokeLinecap="round" />
-              );
-            })}
-            {/* shadow the rolled cuff throws on the skin, then the sleeve and its folded cuff */}
-            <g transform={`translate(${n2(at(0.36)[0])} ${n2(at(0.36)[1])}) rotate(${n2(ang)})`}>
-              <ellipse cx={4} cy={0} rx={4} ry={9} fill="#000" opacity={0.3} filter="url(#wwuSoft2)" />
-            </g>
+            <Limb a={E} b={W} r1={9.4} r2={6.8} fill={skin} />
+            <path
+              d={`M ${n2(at(0.4)[0] + 3)} ${n2(at(0.4)[1])} L ${n2(at(0.95)[0] + 1.5)} ${n2(at(0.95)[1])}`}
+              stroke={lighten(skin, 0.3)}
+              strokeOpacity={0.22}
+              strokeWidth={2.2}
+              strokeLinecap="round"
+            />
             <Limb a={E} b={at(0.34)} r1={10.8} r2={10.2} fill={shirt} />
             <Limb a={at(0.27)} b={at(0.34)} r1={10.9} r2={10.9} fill={lighten(shirt, 0.14)} k={1.4} />
-            <g transform={`translate(${n2(at(0.3)[0])} ${n2(at(0.3)[1])}) rotate(${n2(ang)})`}>
-              <path d="M -2.5 -9 L -2.5 9" stroke={shirtL} strokeOpacity={0.35} strokeWidth={0.7} strokeDasharray="1.6 1.6" />
-            </g>
           </>
         ) : (
           <>
             <Limb a={E} b={back(3)} r1={10.6} r2={8.6} fill={shirt} />
-            <g transform={wristFrame} fill="none" strokeLinecap="round" stroke={shirtD} strokeOpacity={0.4} strokeWidth={1}>
-              <path d="M -13 -7.6 Q -11 0 -13 7.6" />
-              <path d="M -16 -8 Q -14 0 -16 8" />
-              <path d="M -19 -8.6 Q -17 0 -19 8.6" />
-            </g>
             <Limb a={back(8)} b={back(3)} r1={8.8} r2={8.8} fill={lighten(shirt, 0.45)} k={1.2} />
-            <g transform={wristFrame}>
-              <circle cx={-5.5} cy={5} r={1.2} fill={lighten(shirt, 0.8)} opacity={0.8} />
-            </g>
           </>
         )}
 
-        {/* upper arm (bicep bow), elbow, sleeve folds */}
-        <Limb a={S} b={U} r1={13.2} r2={12.6} fill={shirt} />
-        <Limb a={U} b={E} r1={12.6} r2={10.8} fill={shirt} />
+        {/* upper arm, elbow, sleeve folds */}
+        <Limb a={S} b={E} r1={13.2} r2={10.8} fill={shirt} />
         <circle cx={E[0]} cy={E[1]} r={10.8} fill={shirt} />
         <circle cx={E[0]} cy={E[1]} r={10.8} fill="url(#wwuLo)" opacity={0.38} />
-        <g transform={`translate(${n2(S[0])} ${n2(S[1])}) rotate(${n2(angS)})`} fill="none" strokeLinecap="round">
-          {[0.6, 0.7, 0.8, 0.9].map((t, i) => (
-            <g key={i}>
-              <path d={`M ${n2(sl * t)} -9 Q ${n2(sl * t + 3.4)} 0 ${n2(sl * t - 1)} 9`} stroke={shirtD} strokeOpacity={0.45} strokeWidth={1.1} />
-              <path d={`M ${n2(sl * t + 1.3)} -8.5 Q ${n2(sl * t + 4.7)} 0 ${n2(sl * t + 0.3)} 8.5`} stroke={shirtL} strokeOpacity={0.2} strokeWidth={0.8} />
-            </g>
-          ))}
-          <path d="M 9 -9.5 Q 15 -2 11 8" stroke={shirtD} strokeOpacity={0.4} strokeWidth={1} />
-        </g>
+        <path
+          d={`M ${n2(S[0] + (E[0] - S[0]) * 0.65)} ${n2(S[1] + (E[1] - S[1]) * 0.65 - 9)} q 3.4 9 -1 18 M ${n2(S[0] + (E[0] - S[0]) * 0.8)} ${n2(S[1] + (E[1] - S[1]) * 0.8 - 9)} q 3.4 9 -1 18`}
+          stroke={shirtD}
+          strokeOpacity={0.4}
+          strokeWidth={1.1}
+          fill="none"
+          strokeLinecap="round"
+        />
         <path
           d={`M ${S[0] - 6} ${S[1] - 8} Q ${S[0] - 14} ${S[1] + 8} ${E[0] - 8} ${E[1] - 20}`}
           stroke={shirtL}
@@ -1036,7 +902,6 @@ function Person({ look }: { look: Look }) {
             <rect x={-9} y={-8.4} width={7} height={16.8} rx={2.2} fill="#141a27" />
             <rect x={-8.6} y={-5} width={6} height={10} rx={2.2} fill="#0a0e18" stroke="#6e7ea3" strokeWidth={0.7} />
             <rect x={-7.7} y={-4.1} width={4.2} height={8.2} rx={1.4} fill="#2f6bff" opacity={0.65} />
-            <rect x={-7.4} y={-3.8} width={1.4} height={7.6} rx={0.7} fill="#fff" opacity={0.25} />
           </g>
         )}
         {mirror && kara && (
@@ -1048,7 +913,7 @@ function Person({ look }: { look: Look }) {
 
         {/* hand on the keyboard */}
         <g transform={`translate(${n2(W[0])} ${n2(W[1])}) rotate(${n2(j.rot)}) scale(0.8)`}>
-          <g className={`wwu-hand ${mirror ? "r" : "l"}`}>{hand(fd)}</g>
+          <g className={`wwu-hand ${mirror ? "r" : "l"}`}>{hand}</g>
         </g>
       </g>
     );
@@ -1056,37 +921,14 @@ function Person({ look }: { look: Look }) {
 
   /* ───────── hair ───────── */
   const strandsEl = (
-    <g>
+    <g fill="none" strokeLinecap="round">
       {gen.strands.map((s, i) => (
-        <path
-          key={i}
-          d={s.d}
-          stroke={s.l ? hairL : hairD}
-          strokeOpacity={s.l ? 0.2 : 0.28}
-          strokeWidth={s.w}
-          fill="none"
-          strokeLinecap="round"
-        />
-      ))}
-    </g>
-  );
-  const flyEl = (
-    <g fill="none" stroke={hair} strokeOpacity={0.4} strokeWidth={0.6} strokeLinecap="round">
-      {gen.fly.map((d, i) => (
-        <path key={i} d={d} />
+        <path key={i} d={s.d} stroke={s.l ? hairL : hairD} strokeOpacity={s.l ? 0.2 : 0.28} strokeWidth={s.w} />
       ))}
     </g>
   );
   const sheen = (
-    <path
-      d="M -16 -14 Q -5 -23 9 -21"
-      stroke={lighten(hair, 0.55)}
-      strokeOpacity={0.2}
-      strokeWidth={3.2}
-      fill="none"
-      strokeLinecap="round"
-      filter="url(#wwuSoft2)"
-    />
+    <path d="M -16 -14 Q -5 -23 9 -21" stroke={lighten(hair, 0.55)} strokeOpacity={0.16} strokeWidth={3.2} fill="none" strokeLinecap="round" />
   );
   const burns = (op: number) => (
     <g fill={hair} opacity={op}>
@@ -1095,15 +937,7 @@ function Person({ look }: { look: Look }) {
     </g>
   );
   const hairlineShadow = (
-    <path
-      d={HAIRLINE}
-      stroke={skinDD}
-      strokeOpacity={0.35}
-      strokeWidth={3}
-      fill="none"
-      filter="url(#wwuSoft2)"
-      transform="translate(0 2)"
-    />
+    <path d={HAIRLINE} stroke={skinDD} strokeOpacity={0.3} strokeWidth={3} fill="none" transform="translate(0 2)" />
   );
 
   /* hair drawn BEHIND the head (long hair, bun) */
@@ -1115,14 +949,14 @@ function Person({ look }: { look: Look }) {
         <g>
           <path d={d} fill={hair} />
           <path d={d} fill="url(#wwuLo)" opacity={0.55} />
-          <g fill="none" stroke={hairL} strokeOpacity={0.3} strokeWidth={1} strokeLinecap="round">
-            <path d="M -30 12 C -32 22 -29 32 -25 40" />
-            <path d="M 30 12 C 32 22 29 32 25 40" />
-            <path d="M -26 10 C -27 22 -24 30 -22 38" />
-            <path d="M 26 10 C 27 22 24 30 22 38" />
-            <path d="M -14 -38 C -26 -28 -30 -10 -29 4" />
-            <path d="M 14 -38 C 26 -28 30 -10 29 4" />
-          </g>
+          <path
+            d="M -30 12 C -32 22 -29 32 -25 40 M 30 12 C 32 22 29 32 25 40 M -26 10 C -27 22 -24 30 -22 38 M 26 10 C 27 22 24 30 22 38 M -14 -38 C -26 -28 -30 -10 -29 4 M 14 -38 C 26 -28 30 -10 29 4"
+            fill="none"
+            stroke={hairL}
+            strokeOpacity={0.3}
+            strokeWidth={1}
+            strokeLinecap="round"
+          />
         </g>
       );
     }
@@ -1131,9 +965,7 @@ function Person({ look }: { look: Look }) {
         <g>
           <circle cx={0} cy={-31} r={12.5} fill={hair} />
           <circle cx={0} cy={-31} r={12.5} fill="url(#wwuLo)" opacity={0.5} />
-          <g fill="none" stroke={hairL} strokeOpacity={0.38} strokeWidth={1} strokeLinecap="round">
-            <path d="M -9 -31 C -8 -40 8 -40 9 -31 C 8 -24 -4 -24 -5 -31 C -4 -36 4 -36 4 -31" />
-          </g>
+          <path d="M -9 -31 C -8 -40 8 -40 9 -31 C 8 -24 -4 -24 -5 -31 C -4 -36 4 -36 4 -31" fill="none" stroke={hairL} strokeOpacity={0.38} strokeWidth={1} strokeLinecap="round" />
           <ellipse cx={-4} cy={-37} rx={5} ry={2.4} fill="#fff" opacity={0.12} />
           <path d="M -12 -20 Q 0 -16 12 -20" stroke={shirtL} strokeWidth={2.6} strokeLinecap="round" fill="none" />
         </g>
@@ -1156,8 +988,6 @@ function Person({ look }: { look: Look }) {
             {strandsEl}
             <path d="M -8 18 Q -5 6 2 -9" stroke={hairD} strokeOpacity={0.5} strokeWidth={1.1} fill="none" strokeLinecap="round" />
             {sheen}
-            <ellipse cx={-7} cy={-3} rx={12} ry={6} transform="rotate(-24 -7 -3)" fill="#fff" opacity={0.08} />
-            {flyEl}
           </g>
         );
       case "buzz":
@@ -1172,7 +1002,6 @@ function Person({ look }: { look: Look }) {
                 <circle key={i} cx={p.x} cy={p.y} r={0.5} />
               ))}
             </g>
-            <ellipse cx={-6} cy={-4} rx={12} ry={6} transform="rotate(-24 -6 -4)" fill="#fff" opacity={0.07} />
           </g>
         );
       case "long":
@@ -1184,7 +1013,6 @@ function Person({ look }: { look: Look }) {
             {strandsEl}
             <path d="M 0 12 C 0 0 0 -12 0 -26" stroke={skinD} strokeOpacity={0.85} strokeWidth={1.5} strokeLinecap="round" fill="none" />
             <ellipse cx={-9} cy={-6} rx={11} ry={5} transform="rotate(-30 -9 -6)" fill="#fff" opacity={0.12} />
-            {flyEl}
           </g>
         );
       case "bun":
@@ -1195,12 +1023,8 @@ function Person({ look }: { look: Look }) {
             <path d={HAIR_CAP} fill={hair} />
             <path d={HAIR_CAP} fill="url(#wwuLo)" opacity={0.4} />
             {strandsEl}
-            <g fill="none" stroke={hair} strokeOpacity={0.7} strokeWidth={1} strokeLinecap="round">
-              <path d="M -22 9 Q -21 15 -19 19" />
-              <path d="M 22 9 Q 21 15 19 19" />
-            </g>
+            <path d="M -22 9 Q -21 15 -19 19 M 22 9 Q 21 15 19 19" fill="none" stroke={hair} strokeOpacity={0.7} strokeWidth={1} strokeLinecap="round" />
             <ellipse cx={-8} cy={-4} rx={11} ry={5} transform="rotate(-26 -8 -4)" fill="#fff" opacity={0.12} />
-            {flyEl}
           </g>
         );
       case "curly":
@@ -1209,10 +1033,9 @@ function Person({ look }: { look: Look }) {
             <ellipse cx={0} cy={-6} rx={27} ry={24} fill={hairD} />
             {gen.blobs.map((b, i) => (
               <g key={i}>
-                <circle cx={b.x} cy={b.y} r={b.r} fill={mix(hair, b.t > 0.5 ? hairL : hairD, 0.25 + b.t * 0.2)} />
-                <circle cx={b.x} cy={b.y} r={b.r} fill="none" stroke={hairD} strokeWidth={0.8} />
+                <circle cx={b.x} cy={b.y} r={b.r} fill={mix(hair, b.t > 0.5 ? hairL : hairD, 0.25 + b.t * 0.2)} stroke={hairD} strokeWidth={0.8} />
                 <path
-                  d={`M ${b.x - b.r * 0.5} ${b.y - b.r * 0.2} Q ${b.x} ${b.y - b.r * 0.75} ${b.x + b.r * 0.5} ${b.y - b.r * 0.2}`}
+                  d={`M ${n2(b.x - b.r * 0.5)} ${n2(b.y - b.r * 0.2)} Q ${b.x} ${n2(b.y - b.r * 0.75)} ${n2(b.x + b.r * 0.5)} ${n2(b.y - b.r * 0.2)}`}
                   stroke={hairL}
                   strokeOpacity={0.3}
                   strokeWidth={0.9}
@@ -1234,7 +1057,7 @@ function Person({ look }: { look: Look }) {
         });
         return (
           <g>
-            <ellipse cx={0} cy={-3} rx={30} ry={24} fill="#000" opacity={0.35} filter="url(#wwuSoft2)" />
+            <ellipse cx={0} cy={-3} rx={32} ry={26} fill="url(#wwuShadow)" />
             <Shaded shape={<ellipse cx={0} cy={-9} rx={31.5} ry={27} />} fill={cloth} hi={0.22} lo={0.5} />
             {bands.map((d, i) => (
               <g key={i} fill="none" strokeLinecap="round">
@@ -1242,7 +1065,6 @@ function Person({ look }: { look: Look }) {
                 <path d={d} stroke={lighten(cloth, 0.45)} strokeOpacity={0.4} strokeWidth={1} transform="translate(0 1.8)" />
               </g>
             ))}
-            {/* front roll that sits on the forehead */}
             <path d="M -27 3 C -17 21 17 21 27 3" stroke={darken(cloth, 0.5)} strokeOpacity={0.7} strokeWidth={2.6} fill="none" strokeLinecap="round" />
             <path d="M -25 2 C -15 19 15 19 25 2" stroke={lighten(cloth, 0.4)} strokeOpacity={0.45} strokeWidth={1} fill="none" strokeLinecap="round" />
             <ellipse cx={-8} cy={-14} rx={13} ry={6} transform="rotate(-28 -8 -14)" fill="#fff" opacity={0.14} />
@@ -1255,54 +1077,38 @@ function Person({ look }: { look: Look }) {
   };
 
   /* ───────── face ───────── */
-  const irisC = "#3b2616";
   const eye = (sx: number) => (
     <g transform={`translate(${sx * 9.6} 29.8)`}>
       <ellipse cx={0} cy={1.4} rx={6.8} ry={3.8} fill={skinDD} opacity={0.2} />
       <path d="M -5.6 1 Q 0 -3.4 5.6 1 Q 0 3.6 -5.6 1 Z" fill="#f3ece4" />
-      <circle cx={0} cy={1.5} r={2.5} fill={irisC} />
+      <circle cx={0} cy={1.5} r={2.5} fill="#3b2616" />
       <circle cx={0} cy={1.6} r={1.15} fill="#0b0706" />
       <circle cx={sx * 0.7} cy={1} r={0.6} fill="#cfe2ff" opacity={0.9} />
       <path d="M -5.6 1 Q 0 -3.4 5.6 1 Q 0 0.5 -5.6 1 Z" fill={skinD} />
       <path d="M -6 1.2 Q 0 -3.9 6 1.2" stroke="#1b1210" strokeWidth={1.3} fill="none" strokeLinecap="round" />
-      <path d={`M ${sx * 5.6} 0.9 L ${sx * 7.3} -0.2`} stroke="#1b1210" strokeWidth={0.9} strokeLinecap="round" />
       <path d="M -5 -1.7 Q 0 -5 5 -1.7" stroke={skinDD} strokeOpacity={0.5} strokeWidth={0.7} fill="none" strokeLinecap="round" />
-      <path d="M -4.6 2.6 Q 0 4.2 4.6 2.6" stroke={skinDD} strokeOpacity={0.35} strokeWidth={0.6} fill="none" strokeLinecap="round" />
-      <circle cx={-sx * 5.4} cy={1.3} r={0.7} fill="#d98a85" opacity={0.8} />
     </g>
   );
   const brow = (sx: number) => (
     <g transform={`scale(${sx} 1)`}>
       <path d={BROW} fill={browC} opacity={0.94} />
-      <path d="M -4.5 26.2 C -8 23.6 -14 23 -19.5 25.8" stroke={lighten(browC, 0.3)} strokeOpacity={0.3} strokeWidth={0.6} fill="none" />
     </g>
   );
   const ear = (sx: number) => (
     <g transform={`scale(${sx} 1)`}>
       <Shaded edge="wwuLoSkin" shape={<ellipse cx={25.5} cy={10} rx={4.8} ry={8.4} />} fill={skinW} lo={0.5} />
       <path d="M 24.6 5.2 Q 28.3 9.5 25.4 15.6" stroke={skinDD} strokeOpacity={0.5} strokeWidth={1.1} fill="none" strokeLinecap="round" />
-      <ellipse cx={26.3} cy={16.2} rx={2.1} ry={2.3} fill={lighten(skinW, 0.1)} opacity={0.5} />
     </g>
   );
   const nose = (
     <g>
-      <g filter="url(#wwuSoft2)">
-        <ellipse cx={-3.6} cy={29} rx={1.6} ry={7} fill={skinDD} opacity={0.14} />
-        <ellipse cx={3.6} cy={29} rx={1.6} ry={7} fill={skinDD} opacity={0.14} />
-      </g>
       <ellipse cx={0} cy={29} rx={2} ry={7} fill="#fff" opacity={0.13} />
-      <Shaded edge="wwuLoSkin" shape={<ellipse cx={-4.1} cy={37.4} rx={2.7} ry={2.4} />} fill={skin} hi={0.3} lo={0.45} />
-      <Shaded edge="wwuLoSkin" shape={<ellipse cx={4.1} cy={37.4} rx={2.7} ry={2.4} />} fill={skin} hi={0.3} lo={0.45} />
       <Shaded edge="wwuLoSkin" shape={<ellipse cx={0} cy={35.8} rx={4.6} ry={4.2} />} fill={skin} hi={0.38} lo={0.35} />
+      <ellipse cx={-4.1} cy={37.4} rx={2.7} ry={2.4} fill={skin} />
+      <ellipse cx={4.1} cy={37.4} rx={2.7} ry={2.4} fill={skin} />
       <ellipse cx={-2.3} cy={38.7} rx={1.3} ry={0.8} fill="#1a0d08" opacity={0.55} />
       <ellipse cx={2.3} cy={38.7} rx={1.3} ry={0.8} fill="#1a0d08" opacity={0.55} />
-      <g stroke={skinDD} strokeOpacity={0.4} strokeWidth={0.7} fill="none" strokeLinecap="round">
-        <path d="M -6 35.4 Q -7 38.4 -4.4 39.8" />
-        <path d="M 6 35.4 Q 7 38.4 4.4 39.8" />
-        <path d="M -1.3 40.8 L -1.1 42.4" />
-        <path d="M 1.3 40.8 L 1.1 42.4" />
-      </g>
-      <ellipse cx={-0.6} cy={34.8} rx={1.4} ry={0.9} fill="#fff" opacity={0.35} />
+      <path d="M -6 35.4 Q -7 38.4 -4.4 39.8 M 6 35.4 Q 7 38.4 4.4 39.8" stroke={skinDD} strokeOpacity={0.4} strokeWidth={0.7} fill="none" strokeLinecap="round" />
     </g>
   );
   const mouth = (
@@ -1311,75 +1117,129 @@ function Person({ look }: { look: Look }) {
       <path d="M -6.2 44.2 Q 0 45.4 6.2 44.2 Q 4.5 48 0 48 Q -4.5 48 -6.2 44.2 Z" fill={lipC} />
       <ellipse cx={-0.6} cy={46.6} rx={2.4} ry={0.8} fill="#fff" opacity={0.22} />
       <path d="M -7.2 43.7 Q 0 44.8 7.2 43.7" stroke="#3a1410" strokeOpacity={0.7} strokeWidth={0.8} fill="none" strokeLinecap="round" />
-      <ellipse cx={0} cy={49.8} rx={4.6} ry={1.4} fill={skinDD} opacity={0.14} />
-      <ellipse cx={0} cy={50.6} rx={5} ry={2.2} fill="#fff" opacity={0.08} />
     </g>
   );
 
-  /* ───────── laptop: aluminium deck, backlit keys, trackpad, hinge, lid seen from behind ───────── */
+  /* ───────── laptop: aluminium deck, backlit keys, VISIBLE SCREEN with content ───────── */
+  const accL = lighten(shirt, 0.45);
+  const codeCols = ["#7fb0ff", "#ffd479", "#9be28f", "#e6edff"];
+
+  const screenUi =
+    gen.variant === 0 ? (
+      /* a website: browser bar, nav, headline, copy, button and a hero image */
+      <g>
+        <rect x={-49.5} y={159.5} width={99} height={4.6} fill="#fff" opacity={0.1} />
+        <circle cx={-45.5} cy={161.8} r={0.9} fill="#ff6b6b" />
+        <circle cx={-42.8} cy={161.8} r={0.9} fill="#ffd25a" />
+        <circle cx={-40.1} cy={161.8} r={0.9} fill="#6be27f" />
+        <rect x={-34} y={160.8} width={42} height={2} rx={1} fill="#fff" opacity={0.2} />
+        <rect x={-44} y={167} width={9} height={1.6} rx={0.8} fill="#fff" opacity={0.5} />
+        <rect x={-31} y={167} width={8} height={1.6} rx={0.8} fill="#fff" opacity={0.35} />
+        <rect x={-20} y={167} width={8} height={1.6} rx={0.8} fill="#fff" opacity={0.35} />
+        <rect x={-44} y={173} width={36} height={3.4} rx={1.2} fill={accL} />
+        <rect x={-44} y={178.4} width={28} height={3.4} rx={1.2} fill={accL} opacity={0.85} />
+        <rect x={-44} y={184} width={32} height={1.4} rx={0.7} fill="#fff" opacity={0.4} />
+        <rect x={-44} y={187} width={24} height={1.4} rx={0.7} fill="#fff" opacity={0.3} />
+        <rect x={-44} y={190.2} width={15} height={4} rx={2} fill={shirt} stroke="#fff" strokeOpacity={0.5} strokeWidth={0.4} />
+        <rect x={6} y={167} width={40} height={26} rx={2.5} fill={`url(#${sid}Img)`} />
+        <circle cx={26} cy={180} r={7} fill="#fff" opacity={0.22} />
+        <circle cx={26} cy={180} r={3} fill="#fff" opacity={0.45} />
+      </g>
+    ) : gen.variant === 1 ? (
+      /* a code editor: line numbers, coloured code, status bar */
+      <g>
+        <rect x={-49.5} y={159.5} width={99} height={4.6} fill="#fff" opacity={0.08} />
+        <rect x={-46} y={160.9} width={16} height={2} rx={0.8} fill="#fff" opacity={0.22} />
+        <rect x={-49.5} y={164.1} width={7} height={29.4} fill="#000" opacity={0.18} />
+        {gen.code.map((l, i) => (
+          <g key={i}>
+            <rect x={-47.5} y={166 + i * 3.7} width={2.4} height={1.5} rx={0.6} fill="#fff" opacity={0.28} />
+            <rect x={-40 + l.x} y={166 + i * 3.7} width={l.w} height={1.6} rx={0.8} fill={codeCols[l.c]} opacity={0.88} />
+            {i % 3 === 0 && <rect x={-40 + l.x + l.w + 2} y={166 + i * 3.7} width={10} height={1.6} rx={0.8} fill={codeCols[(l.c + 1) % 4]} opacity={0.7} />}
+          </g>
+        ))}
+        <rect x={-49.5} y={193.3} width={99} height={2.2} fill={shirt} opacity={0.85} />
+      </g>
+    ) : (
+      /* a dashboard: stat cards, bar chart, donut */
+      <g>
+        <rect x={-49.5} y={159.5} width={99} height={4.6} fill="#fff" opacity={0.08} />
+        {[0, 1, 2].map((i) => (
+          <g key={i}>
+            <rect x={-46 + i * 31} y={166} width={28} height={9.5} rx={1.6} fill="#fff" opacity={0.12} />
+            <rect x={-43.5 + i * 31} y={168} width={9} height={1.6} rx={0.8} fill="#fff" opacity={0.45} />
+            <rect x={-43.5 + i * 31} y={171.2} width={15 - i * 2} height={2.4} rx={1} fill={accL} />
+          </g>
+        ))}
+        {gen.bars.map((h, i) => (
+          <rect key={i} x={-44 + i * 6.4} y={194 - h} width={4.4} height={h} rx={0.8} fill={accL} opacity={0.5 + i * 0.08} />
+        ))}
+        <path d={`M -44 ${n2(190 - gen.bars[0])} L -37.6 ${n2(190 - gen.bars[1])} L -31.2 ${n2(190 - gen.bars[2])} L -24.8 ${n2(190 - gen.bars[3])} L -18.4 ${n2(190 - gen.bars[4])} L -12 ${n2(190 - gen.bars[5])}`} stroke="#fff" strokeOpacity={0.7} strokeWidth={0.9} fill="none" strokeLinejoin="round" />
+        <circle cx={30} cy={184} r={8} fill="none" stroke="#fff" strokeOpacity={0.15} strokeWidth={3.4} />
+        <circle cx={30} cy={184} r={8} fill="none" stroke={accL} strokeWidth={3.4} strokeDasharray="32 19" transform="rotate(-90 30 184)" />
+        <rect x={12} y={187} width={0} height={0} />
+      </g>
+    );
+
   const laptop = (
     <g>
-      {/* contact shadow on the table */}
-      <rect x={-52} y={108} width={104} height={88} rx={9} fill="#000" opacity={0.55} filter="url(#wwuSoft2)" transform="translate(3 7)" />
+      <defs>
+        <radialGradient id={sid} cx="50%" cy="40%" r="55%">
+          <stop offset="0" stopColor={shirtL} stopOpacity="0.55" />
+          <stop offset="1" stopColor={shirt} stopOpacity="0" />
+        </radialGradient>
+        <linearGradient id={`${sid}Bg`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={darken(shirt, 0.72)} />
+          <stop offset="1" stopColor={darken(shirt, 0.9)} />
+        </linearGradient>
+        <linearGradient id={`${sid}Img`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={shirtL} />
+          <stop offset="1" stopColor={darken(shirt, 0.35)} />
+        </linearGradient>
+      </defs>
 
-      {/* lid (the screen faces the person, so we see its back) */}
-      <rect x={-52} y={157} width={104} height={36} rx={6} fill="url(#wwuAlu)" stroke="#161d30" strokeWidth={0.8} />
-      <rect x={-52} y={157} width={104} height={36} rx={6} fill="url(#wwuLo)" opacity={0.4} />
-      <path d="M -30 157 L 10 157 L -14 193 L -52 193 L -52 172 Z" fill="#fff" opacity={0.09} />
-      <rect x={-51} y={157.6} width={102} height={1.2} rx={0.6} fill="#fff" opacity={0.32} />
-      <rect x={-51} y={190} width={102} height={3} rx={1.5} fill="#000" opacity={0.28} />
-      <circle cx={0} cy={175} r={14} fill={shirt} opacity={0.38} filter="url(#wwuSoft2)" className="wwu-logo" />
-      <circle className="wwu-logo" cx={0} cy={175} r={4.4} fill={shirtL} />
-      <circle cx={0} cy={175} r={4.4} fill="none" stroke="#fff" strokeOpacity={0.3} strokeWidth={0.6} />
+      {/* light from the screen spilling onto the table */}
+      <ellipse className="wwu-glow" cx={0} cy={214} rx={84} ry={30} fill={`url(#${sid})`} />
+
+      {/* contact shadow (two plain layers, no blur filter) */}
+      <rect x={-56} y={110} width={112} height={100} rx={12} fill="#000" opacity={0.18} />
+      <rect x={-52} y={111} width={106} height={96} rx={9} fill="#000" opacity={0.28} />
 
       {/* deck */}
-      <rect x={-52} y={107} width={104} height={49} rx={6} fill="url(#wwuAlu)" stroke="#161d30" strokeWidth={0.9} />
-      <rect x={-51.2} y={107.8} width={102.4} height={47.4} rx={5.4} fill="none" stroke="#e6ecfa" strokeOpacity={0.35} strokeWidth={0.7} />
-      <rect x={-52} y={107} width={104} height={49} rx={6} fill="url(#wwuHi)" opacity={0.2} />
-      <path d="M -9 107.4 Q 0 110.4 9 107.4" stroke="#1a2236" strokeOpacity={0.7} strokeWidth={0.9} fill="none" strokeLinecap="round" />
+      <rect x={-52} y={107} width={104} height={50} rx={6} fill="url(#wwuAlu)" stroke="#161d30" strokeWidth={0.9} />
+      <rect x={-51.2} y={107.8} width={102.4} height={48.4} rx={5.4} fill="none" stroke="#e6ecfa" strokeOpacity={0.35} strokeWidth={0.7} />
+      <rect x={-52} y={107} width={104} height={50} rx={6} fill="url(#wwuHi)" opacity={0.18} />
 
-      {/* speaker grilles */}
-      <g stroke="#2a3248" strokeWidth={1.1} strokeLinecap="round" strokeDasharray="0.01 2.1" opacity={0.85}>
-        <line x1={-49.4} y1={112} x2={-49.4} y2={138} />
-        <line x1={-48.2} y1={113} x2={-48.2} y2={137} />
-        <line x1={49.4} y1={112} x2={49.4} y2={138} />
-        <line x1={48.2} y1={113} x2={48.2} y2={137} />
-      </g>
-
-      {/* keyboard well, backlight and keys */}
-      <rect x={-46} y={110.4} width={92} height={28.6} rx={2.5} fill="#070a12" stroke="#0d1220" strokeWidth={0.5} />
-      <rect className="wwu-glow" x={-46} y={110.4} width={92} height={28.6} rx={2.5} fill="#3b78ff" fillOpacity={0.4} />
-      <g fill="#171e2e" stroke="#2b3550" strokeWidth={0.3}>
-        {KEYROWS.map((k, i) => (
-          <rect key={i} x={k.x} y={k.y} width={k.w} height={k.h} rx={0.9} />
-        ))}
-      </g>
-      <g fill="#fff" opacity={0.07}>
-        {KEYROWS.map((k, i) => (
-          <rect key={i} x={k.x + 0.4} y={k.y + 0.3} width={k.w - 0.8} height={0.7} rx={0.35} />
-        ))}
-      </g>
+      {/* keyboard well: backlight + the whole key grid from ONE pattern */}
+      <rect x={-46} y={110.4} width={92} height={29} rx={2.5} fill="#070a12" stroke="#0d1220" strokeWidth={0.5} />
+      <rect className="wwu-glow" x={-46} y={110.4} width={92} height={29} rx={2.5} fill="#3b78ff" fillOpacity={0.4} />
+      <rect x={-44.4} y={112.6} width={88.9} height={25.5} fill="url(#wwuKeys)" />
 
       {/* glass trackpad */}
       <rect x={-18} y={142} width={36} height={11} rx={2.2} fill="#7e8aa4" stroke="#2c364f" strokeOpacity={0.7} strokeWidth={0.7} />
-      <rect x={-18} y={142} width={36} height={11} rx={2.2} fill="url(#wwuHi)" opacity={0.28} />
       <path d="M -15 143.6 L -2 143.6" stroke="#fff" strokeOpacity={0.35} strokeWidth={0.7} strokeLinecap="round" />
-
-      {/* screen light on the deck */}
-      <ellipse className="wwu-glow" cx={0} cy={126} rx={72} ry={30} fill="url(#wwuFace)" fillOpacity={0.9} />
 
       {/* hinge */}
       <rect x={-50} y={155.2} width={100} height={3.6} rx={1.6} fill="#0a0f1c" />
       <rect x={-50} y={155.6} width={100} height={0.9} rx={0.45} fill="#fff" opacity={0.2} />
+
+      {/* SCREEN: bezel, webcam, glass with content, glare, metal top edge */}
+      <rect x={-52.5} y={156.5} width={105} height={43.5} rx={4.5} fill="#0a0f1c" stroke="#2a3552" strokeWidth={0.8} />
+      <circle cx={0} cy={158} r={0.8} fill="#1f2a44" />
+      <rect x={-49.5} y={159.5} width={99} height={36} rx={2.5} fill={`url(#${sid}Bg)`} />
+      {screenUi}
+      <path d="M -49.5 159.5 L -6 159.5 L -28 195.5 L -49.5 195.5 Z" fill="#fff" opacity={0.06} />
+      <rect x={-49.5} y={159.5} width={99} height={36} rx={2.5} fill="none" stroke="#fff" strokeOpacity={0.14} strokeWidth={0.5} />
+      <rect x={-52.5} y={198.4} width={105} height={3.2} rx={1.6} fill="url(#wwuAlu)" stroke="#161d30" strokeWidth={0.5} />
     </g>
   );
 
   const cup = (
     <g>
       <path d="M 96 122 Q 106 127 96 133" stroke="#e8f0ff" strokeWidth={3.4} fill="none" strokeLinecap="round" />
-      <circle cx={88} cy={129} r={16} fill="#000" opacity={0.4} filter="url(#wwuSoft2)" />
+      <ellipse cx={89} cy={131} rx={19} ry={19} fill="url(#wwuShadow)" />
       <Shaded shape={<circle cx={87} cy={127} r={14.5} />} fill="#cfdcf5" hi={0.2} lo={0.35} />
-      <Shaded shape={<circle cx={87} cy={127} r={10.5} />} fill="#f4f8ff" hi={0.2} lo={0.3} />
+      <circle cx={87} cy={127} r={10.5} fill="#f4f8ff" />
       <circle cx={87} cy={127} r={8.2} fill="#2b1d12" />
       <ellipse cx={85.6} cy={125.6} rx={4.2} ry={2.7} fill="#8a6038" opacity={0.55} />
       <ellipse cx={83.5} cy={124.4} rx={2.2} ry={1} fill="#fff" opacity={0.4} />
@@ -1389,15 +1249,11 @@ function Person({ look }: { look: Look }) {
   const side =
     item === "notebook" ? (
       <g transform="translate(-86 134) rotate(-10)">
-        <rect x={-18} y={-24} width={36} height={48} rx={3} fill="#000" opacity={0.45} filter="url(#wwuSoft2)" transform="translate(2 4)" />
+        <rect x={-18} y={-24} width={36} height={48} rx={3} fill="#000" opacity={0.35} transform="translate(2 4)" />
         <rect x={-18} y={-24} width={36} height={48} rx={3} fill="#162a5e" stroke="#3c6fe0" strokeOpacity={0.7} />
         <rect x={-18} y={-24} width={6} height={48} rx={3} fill="#0d1b40" />
         <rect x={-8} y={-16} width={22} height={4} rx={1} fill={shirt} opacity={0.85} />
-        <g stroke="#7fb0ff" strokeOpacity={0.25}>
-          <line x1={-8} y1={-6} x2={14} y2={-6} />
-          <line x1={-8} y1={0} x2={14} y2={0} />
-          <line x1={-8} y1={6} x2={10} y2={6} />
-        </g>
+        <path d="M -8 -6 H 14 M -8 0 H 14 M -8 6 H 10" stroke="#7fb0ff" strokeOpacity={0.25} />
         <g transform="translate(25 0) rotate(10)">
           <rect x={-1.7} y={-19} width={3.4} height={36} rx={1.7} fill="#e8f0ff" />
           <rect x={-1.7} y={-19} width={3.4} height={9} rx={1.7} fill={shirt} />
@@ -1406,7 +1262,7 @@ function Person({ look }: { look: Look }) {
     ) : (
       <g transform="translate(-86 136) rotate(9)">
         <ellipse cx={0} cy={0} rx={22} ry={30} fill="url(#wwuScreen)" />
-        <rect x={-9} y={-18} width={18} height={36} rx={4} fill="#000" opacity={0.45} filter="url(#wwuSoft2)" transform="translate(2 3)" />
+        <rect x={-9} y={-18} width={18} height={36} rx={4} fill="#000" opacity={0.35} transform="translate(2 3)" />
         <rect x={-9} y={-18} width={18} height={36} rx={4} fill="#05080f" stroke="#3c6fe0" strokeOpacity={0.7} strokeWidth={0.7} />
         <rect x={-7.5} y={-16.5} width={15} height={33} rx={2.8} fill="#1f46b8" />
         <rect x={-6} y={-12} width={12} height={4} rx={1.2} fill="#fff" opacity={0.75} />
@@ -1417,88 +1273,54 @@ function Person({ look }: { look: Look }) {
     );
 
   /* ───────── office chair ───────── */
-
-  /* five-star base: legs, hub and casters (seen peeking out under the seat and behind the backrest) */
   const chairBase = (
     <g>
       {CHAIR_LEGS.map((l, i) => (
         <g key={i}>
-          <g opacity={0.5} filter="url(#wwuSoft2)" transform="translate(3 5)">
-            <path d={taper(0, -2, l.x, l.y, 7.5, 4.4)} fill="#000" />
-          </g>
           <Limb a={[0, -2]} b={[l.x, l.y]} r1={7.5} r2={4.4} fill="#3a4768" />
-          <path d={`M 0 -2 L ${l.x} ${l.y}`} stroke="#a9bdf0" strokeOpacity={0.3} strokeWidth={1} strokeLinecap="round" />
-          {/* caster */}
-          <circle cx={l.x + 1.2} cy={l.y + 1.8} r={6.6} fill="#000" opacity={0.45} />
+          <circle cx={l.x + 1.2} cy={l.y + 1.8} r={6.6} fill="#000" opacity={0.4} />
           <circle cx={l.x} cy={l.y} r={6} fill="#10162b" stroke="#4a5d94" strokeWidth={0.9} />
-          <circle cx={l.x} cy={l.y} r={3.2} fill="#222d56" stroke="#0a0f22" strokeWidth={0.6} />
-          <circle cx={l.x - 2} cy={l.y - 2} r={1.1} fill="#fff" opacity={0.35} />
+          <circle cx={l.x} cy={l.y} r={3.2} fill="#222d56" />
         </g>
       ))}
       <circle cx={0} cy={-2} r={12} fill={chD} stroke="#34457f" strokeWidth={0.8} />
       <circle cx={0} cy={-2} r={7} fill="#3a4768" />
-      <circle cx={0} cy={-2} r={7} fill="url(#wwuLo)" opacity={0.5} />
     </g>
   );
 
-  /* padded seat: weave, piping, stitching, centre seam, waterfall front edge */
   const chairSeat = (
     <g>
       <path d={SEAT} fill={ch} />
-      <path d={SEAT} fill="url(#wwuWeave)" />
       <path d={SEAT} fill="url(#wwuLo)" opacity={0.55} />
       <path d={SEAT} fill="url(#wwuHi)" opacity={0.2} />
-      <g filter="url(#wwuSoft2)">
-        <ellipse cx={-50} cy={8} rx={9} ry={34} fill={chD} opacity={0.35} />
-        <ellipse cx={50} cy={8} rx={9} ry={34} fill={chD} opacity={0.35} />
-      </g>
-      <path d="M -56 52 C -44 62 44 62 56 52" stroke="#9fb8f5" strokeOpacity={0.24} strokeWidth={3} fill="none" strokeLinecap="round" filter="url(#wwuSoft2)" />
       <path d="M 0 -38 L 0 58" stroke={chD} strokeOpacity={0.6} strokeWidth={1.1} />
-      <path d="M 1.2 -38 L 1.2 58" stroke="#9fb8f5" strokeOpacity={0.12} strokeWidth={0.8} />
       <path d={SEAT_STITCH} stroke={rim} strokeOpacity={0.4} strokeWidth={0.9} strokeDasharray="2.4 2.2" fill="none" />
       <path d={SEAT} fill="none" stroke={rim} strokeOpacity={0.55} strokeWidth={1.4} strokeLinejoin="round" />
-      {/* tilt lever under the right side of the seat */}
       <rect x={64} y={38} width={13} height={3} rx={1.5} fill="url(#wwuMetal)" stroke="#0a0f22" strokeWidth={0.5} />
       <circle cx={78} cy={39.5} r={2.6} fill="#10162b" stroke="#6c82c8" strokeWidth={0.7} />
     </g>
   );
 
-  /* curved backrest: shell, padded ribbed panel, stitching, sheen */
   const chairBack = (
     <g>
-      <g opacity={0.5} filter="url(#wwuSoft2)" transform="translate(0 4)">
-        <path d={BACK_OUT} fill="#000" />
-      </g>
       <path d={BACK_OUT} fill={chD} />
       <path d={BACK_OUT} fill="none" stroke="#3b4f8f" strokeWidth={1.4} strokeLinejoin="round" />
       <path d={BACK_PAD} fill={chL} />
-      <path d={BACK_PAD} fill="url(#wwuWeave)" />
       <path d={BACK_PAD} fill="url(#wwuLo)" opacity={0.6} />
       <path d={BACK_PAD} fill="url(#wwuHi)" opacity={0.22} />
-      <g strokeLinecap="round">
-        {BACK_RIBS.map((b) => (
-          <g key={b.x}>
-            <path d={`M ${b.x} ${b.y1} L ${b.x} ${b.y2}`} stroke={chD} strokeOpacity={0.55} strokeWidth={1.1} />
-            <path d={`M ${b.x + 1.2} ${b.y1} L ${b.x + 1.2} ${b.y2}`} stroke="#9fb8f5" strokeOpacity={0.14} strokeWidth={0.8} />
-          </g>
-        ))}
-      </g>
+      <path d={BACK_RIBS} stroke={chD} strokeOpacity={0.55} strokeWidth={1.1} strokeLinecap="round" fill="none" />
       <path d={BACK_PAD} fill="none" stroke={rim} strokeOpacity={0.45} strokeWidth={1} strokeDasharray="2.4 2.2" />
-      <path d="M -44 -72 C -22 -83 22 -83 44 -72" stroke="#cfe0ff" strokeOpacity={0.2} strokeWidth={3} fill="none" strokeLinecap="round" filter="url(#wwuSoft2)" />
+      <path d="M -44 -72 C -22 -83 22 -83 44 -72" stroke="#cfe0ff" strokeOpacity={0.2} strokeWidth={3} fill="none" strokeLinecap="round" />
     </g>
   );
 
-  /* padded armrests on brackets */
   const chairArms = (
     <g>
       {[-1, 1].map((sx) => (
         <g key={sx} transform={`scale(${sx} 1)`}>
           <rect x={60} y={-4} width={14} height={30} rx={4} fill={chD} stroke="#34457f" strokeWidth={0.8} />
-          <g opacity={0.5} filter="url(#wwuSoft2)" transform="translate(3 4)">
-            <rect x={68} y={-18} width={15} height={70} rx={7.5} fill="#000" />
-          </g>
+          <rect x={71} y={-14} width={15} height={70} rx={7.5} fill="#000" opacity={0.3} />
           <Shaded shape={<rect x={68} y={-18} width={15} height={70} rx={7.5} />} fill={chL} hi={0.3} lo={0.5} />
-          <rect x={68} y={-18} width={15} height={70} rx={7.5} fill="url(#wwuWeave)" />
           <path d="M 71.5 -11 L 71.5 44" stroke="#bcd0ff" strokeOpacity={0.24} strokeWidth={1.4} strokeLinecap="round" />
           <rect x={68} y={-18} width={15} height={70} rx={7.5} fill="none" stroke={rim} strokeOpacity={0.5} strokeWidth={0.9} />
         </g>
@@ -1506,18 +1328,13 @@ function Person({ look }: { look: Look }) {
     </g>
   );
 
-  /* thighs: they go under the table */
   const thighs = (
     <g>
       {[-1, 1].map((sx) => (
         <g key={sx}>
-          <g opacity={0.4} filter="url(#wwuSoft2)" transform="translate(2 5)">
-            <path d={taper(sx * 24, 14, sx * 27, 66, 18, 12)} fill="#000" />
-          </g>
           <Limb a={[sx * 24, 14]} b={[sx * 27, 66]} r1={18} r2={12} fill={pants} />
           <circle cx={sx * 27} cy={66} r={12} fill={pants} />
           <circle cx={sx * 27} cy={66} r={12} fill="url(#wwuLo)" opacity={0.5} />
-          <path d={`M ${sx * 22} 34 L ${sx * 25} 62`} stroke={lighten(pants, 0.25)} strokeOpacity={0.3} strokeWidth={1} strokeLinecap="round" />
         </g>
       ))}
     </g>
@@ -1529,7 +1346,7 @@ function Person({ look }: { look: Look }) {
       <circle className="wwu-halo" cx={0} cy={40} r={140} fill="url(#wwuHalo)" />
 
       {/* chair: shadow, base, seat, backrest, armrests */}
-      <ellipse cx={0} cy={8} rx={98} ry={80} fill="#000" opacity={0.45} filter="url(#wwuSoft)" />
+      <ellipse cx={0} cy={10} rx={112} ry={92} fill="url(#wwuShadow)" />
       {chairBase}
       {chairSeat}
       {chairBack}
@@ -1540,21 +1357,21 @@ function Person({ look }: { look: Look }) {
       {/* torso: sloped shoulders, seams, rounded deltoids */}
       <g className="wwu-body">
         <Shaded shape={<path d={TORSO} />} fill={shirt} hi={0.22} lo={0.5} />
-        <g stroke={shirtD} strokeOpacity={0.5} strokeWidth={1.2} strokeLinecap="round" fill="none">
-          <path d="M -46 -24 Q -57 -10 -63 6" />
-          <path d="M 46 -24 Q 57 -10 63 6" />
-          <path d="M -50 8 Q -44 18 -34 24" />
-          <path d="M 50 8 Q 44 18 34 24" />
-          <path d="M -30 -28 Q -22 -22 -18 -16" />
-          <path d="M 30 -28 Q 22 -22 18 -16" />
-        </g>
+        <path
+          d="M -46 -24 Q -57 -10 -63 6 M 46 -24 Q 57 -10 63 6 M -50 8 Q -44 18 -34 24 M 50 8 Q 44 18 34 24 M -30 -28 Q -22 -22 -18 -16 M 30 -28 Q 22 -22 18 -16"
+          stroke={shirtD}
+          strokeOpacity={0.5}
+          strokeWidth={1.2}
+          strokeLinecap="round"
+          fill="none"
+        />
         <ellipse cx={0} cy={-18} rx={32} ry={10} fill={shirtL} opacity={0.1} />
         <Shaded shape={<circle cx={-55} cy={4} r={14.5} />} fill={shirt} hi={0.3} lo={0.4} />
         <Shaded shape={<circle cx={55} cy={4} r={14.5} />} fill={shirt} hi={0.3} lo={0.4} />
       </g>
 
-      {/* the head casts a soft shadow on the shoulders (light comes from the table) */}
-      <ellipse cx={0} cy={-8} rx={38} ry={30} fill="#000" opacity={0.38} filter="url(#wwuSoft)" />
+      {/* the head casts a soft shadow on the shoulders */}
+      <ellipse cx={0} cy={-8} rx={44} ry={36} fill="url(#wwuShadow)" />
 
       {/* collar + neck */}
       <ellipse cx={0} cy={-17} rx={17} ry={14} fill={shirtL} stroke={shirtD} strokeOpacity={0.5} strokeWidth={1} />
@@ -1577,33 +1394,23 @@ function Person({ look }: { look: Look }) {
           {ear(-1)}
           {ear(1)}
 
-          {/* shadow of the chin on the collar */}
-          <ellipse cx={0} cy={50} rx={16} ry={6} fill="#000" opacity={0.3} filter="url(#wwuSoft2)" />
+          <ellipse cx={0} cy={50} rx={18} ry={7} fill="url(#wwuShadow)" />
 
-          {/* face: egg-shaped skull and jaw, then sculpting (temples, cheekbones, under-cheek) */}
+          {/* face: egg-shaped skull and jaw, then sculpting */}
           <Shaded edge="wwuLoSkin" shape={<path d={FACE} />} fill={skin} hi={0.34} lo={0.4} />
-          <g filter="url(#wwuSoft2)">
-            <ellipse cx={-23} cy={18} rx={3} ry={8} fill={skinDD} opacity={0.16} />
-            <ellipse cx={23} cy={18} rx={3} ry={8} fill={skinDD} opacity={0.16} />
-            <ellipse cx={-17} cy={39} rx={6} ry={8} fill={skinDD} opacity={0.16} />
-            <ellipse cx={17} cy={39} rx={6} ry={8} fill={skinDD} opacity={0.16} />
-            <ellipse cx={-14} cy={31} rx={6} ry={3} fill="#fff" opacity={0.1} />
-            <ellipse cx={14} cy={31} rx={6} ry={3} fill="#fff" opacity={0.1} />
-            <circle cx={-15} cy={33} r={5.5} fill="#e0524a" opacity={0.12} />
-            <circle cx={15} cy={33} r={5.5} fill="#e0524a" opacity={0.12} />
-            <ellipse cx={0} cy={22} rx={11} ry={3.4} fill="#fff" opacity={0.09} />
-          </g>
+          <ellipse cx={-23} cy={18} rx={3} ry={8} fill={skinDD} opacity={0.14} />
+          <ellipse cx={23} cy={18} rx={3} ry={8} fill={skinDD} opacity={0.14} />
+          <ellipse cx={-17} cy={39} rx={6} ry={8} fill={skinDD} opacity={0.12} />
+          <ellipse cx={17} cy={39} rx={6} ry={8} fill={skinDD} opacity={0.12} />
+          <circle cx={-15} cy={33} r={5.5} fill="#e0524a" opacity={0.1} />
+          <circle cx={15} cy={33} r={5.5} fill="#e0524a" opacity={0.1} />
 
           {/* beard + moustache, or lips */}
           {beard ? (
             <g>
               <path d={BEARD} fill={hair} />
               <path d={BEARD} fill="url(#wwuLo)" opacity={0.45} />
-              <g fill="none" stroke={lighten(hair, 0.3)} strokeOpacity={0.28} strokeWidth={0.6} strokeLinecap="round">
-                {gen.beardS.map((d, i) => (
-                  <path key={i} d={d} />
-                ))}
-              </g>
+              <path d="M -16 40 q 1 5 0 9 M -8 44 q 1 5 0 10 M 0 46 q 0 5 0 10 M 8 44 q -1 5 0 10 M 16 40 q -1 5 0 9" stroke={lighten(hair, 0.3)} strokeOpacity={0.28} strokeWidth={0.6} fill="none" strokeLinecap="round" />
               <path d={MUSTACHE} fill={hair} />
               <path d={MUSTACHE} fill="url(#wwuLo)" opacity={0.3} />
             </g>
@@ -1634,8 +1441,7 @@ function Person({ look }: { look: Look }) {
                 <rect x={3} y={26.5} width={17} height={11} rx={4.5} fill="#9cc4ff" fillOpacity={0.1} />
                 <path d="M -3 29.5 Q 0 27.8 3 29.5" />
               </g>
-              <path d="M -17 28.5 L -9 28" stroke="#bcd8ff" strokeOpacity={0.55} strokeWidth={0.9} strokeLinecap="round" />
-              <path d="M 7 28 L 15 28.5" stroke="#bcd8ff" strokeOpacity={0.55} strokeWidth={0.9} strokeLinecap="round" />
+              <path d="M -17 28.5 L -9 28 M 7 28 L 15 28.5" stroke="#bcd8ff" strokeOpacity={0.55} strokeWidth={0.9} strokeLinecap="round" />
             </g>
           )}
         </g>
@@ -1670,6 +1476,7 @@ export default function WhyWorkWithUs() {
   const [active, setActive] = useState(-1);
   const [live, setLive] = useState(false); // section is near the viewport (animations run)
   const [armed, setArmed] = useState(false); // book has been mounted at least once
+  const [lite, setLite] = useState(false); // weak device: far fewer animations
 
   /* viewport (resize is debounced so the book is not rebuilt while dragging the window) */
   useEffect(() => {
@@ -1681,6 +1488,11 @@ export default function WhyWorkWithUs() {
     };
     measure();
     setMounted(true);
+
+    /* weak device: 4 cores or fewer, 2 GB of memory or less, or the visitor asked for "save data" */
+    const nav = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } };
+    setLite((nav.hardwareConcurrency ?? 8) <= 4 || (nav.deviceMemory ?? 8) <= 2 || !!nav.connection?.saveData);
+
     window.addEventListener("resize", onResize);
     return () => {
       window.clearTimeout(t);
@@ -1794,11 +1606,12 @@ export default function WhyWorkWithUs() {
     }
   }, []);
 
+  /* the poll only runs while the section is near the screen */
   useEffect(() => {
-    if (!mounted || !armed) return;
+    if (!mounted || !armed || !live) return;
     const id = window.setInterval(sync, 90);
     return () => window.clearInterval(id);
-  }, [mounted, armed, sync]);
+  }, [mounted, armed, live, sync]);
 
   const setBookRef = useCallback((r: unknown) => {
     bookRef.current = r as FlipHandle | null;
@@ -1825,14 +1638,14 @@ export default function WhyWorkWithUs() {
     [goTo]
   );
 
-  /* stars (seeded so server and client match) */
+  /* stars (seeded so server and client match). Only every 3rd one twinkles (see CSS). */
   const stars = useMemo(() => {
     let s = 11;
     const rnd = () => {
       s = (s * 16807) % 2147483647;
       return s / 2147483647;
     };
-    return Array.from({ length: 90 }, () => ({
+    return Array.from({ length: 64 }, () => ({
       x: +(rnd() * 100).toFixed(2),
       y: +(rnd() * 100).toFixed(2),
       r: +(rnd() * 1.6 + 0.5).toFixed(2),
@@ -1980,7 +1793,7 @@ export default function WhyWorkWithUs() {
     <section
       ref={sectionRef}
       id="why-us"
-      className={`wwu ${mobile ? "wwu-m" : ""} ${live ? "live" : ""}`}
+      className={`wwu ${mobile ? "wwu-m" : ""} ${live ? "live" : ""} ${lite ? "wwu-lite" : ""}`}
       style={{ height: `${SECTION_HEIGHT_VH}vh` }}
     >
       <style>{CSS}</style>
@@ -2028,23 +1841,24 @@ export default function WhyWorkWithUs() {
         >
           <svg className="wwu-svg" viewBox={`0 0 ${VB} ${VB}`} role="img" aria-label="Six team members sitting around a table">
             <defs>
-              <radialGradient id="wwuTable" cx="50%" cy="45%" r="60%">
-                <stop offset="0" stopColor="#102248" />
-                <stop offset="1" stopColor="#060d22" />
+              {/* table: deep navy glass that matches the site (navy night, electric-blue neon, icy white) */}
+              <radialGradient id="wwuTable" cx="50%" cy="42%" r="62%">
+                <stop offset="0" stopColor="#0d2f8f" />
+                <stop offset="0.55" stopColor="#061a52" />
+                <stop offset="1" stopColor="#020a24" />
+              </radialGradient>
+              {/* neon glow around the rim, drawn as a gradient (no blur filter) */}
+              <radialGradient id="wwuTableGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0.72" stopColor="#2f6bff" stopOpacity="0" />
+                <stop offset="0.79" stopColor="#3b8bff" stopOpacity="0.5" />
+                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
               </radialGradient>
               <radialGradient id="wwuHalo">
                 <stop offset="0" stopColor="#3b82ff" stopOpacity="0.55" />
                 <stop offset="1" stopColor="#3b82ff" stopOpacity="0" />
               </radialGradient>
-              <filter id="wwuGlow" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="6" result="b" />
-                <feMerge>
-                  <feMergeNode in="b" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
 
-              {/* centre star: core gradient, aura, blur */}
+              {/* centre star: core gradient + auras (no blur filters) */}
               <radialGradient id="wwuCoreG" cx="50%" cy="50%" r="50%">
                 <stop offset="0" stopColor="#ffffff" />
                 <stop offset="0.35" stopColor="#bcd8ff" />
@@ -2055,32 +1869,33 @@ export default function WhyWorkWithUs() {
                 <stop offset="0.5" stopColor="#2f6bff" stopOpacity="0.18" />
                 <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
               </radialGradient>
-              <filter id="wwuStarBlur" x="-100%" y="-100%" width="300%" height="300%">
-                <feGaussianBlur stdDeviation="9" />
-              </filter>
+              <radialGradient id="wwuStarAura2">
+                <stop offset="0" stopColor="#cfe2ff" stopOpacity="0.8" />
+                <stop offset="0.4" stopColor="#4f8bff" stopOpacity="0.4" />
+                <stop offset="1" stopColor="#2f6bff" stopOpacity="0" />
+              </radialGradient>
 
               <PersonDefs />
             </defs>
 
             {/* table */}
-            <circle cx={500} cy={500} r={TABLE_R + 22} fill="#2f6bff" opacity={0.08} />
-            <circle cx={500} cy={500} r={TABLE_R} fill="url(#wwuTable)" stroke="#2f6bff" strokeWidth={3} filter="url(#wwuGlow)" />
-            <circle cx={500} cy={500} r={TABLE_R - 34} fill="none" stroke="#4f8bff" strokeOpacity={0.18} strokeWidth={1.5} />
+            <circle cx={500} cy={500} r={TABLE_R + 70} fill="url(#wwuTableGlow)" />
+            <circle cx={500} cy={500} r={TABLE_R} fill="url(#wwuTable)" stroke="#3b8bff" strokeWidth={3} />
+            <circle cx={500} cy={500} r={TABLE_R - 2} fill="none" stroke="#9cc4ff" strokeOpacity={0.4} strokeWidth={1} />
+            <circle cx={500} cy={500} r={TABLE_R - 34} fill="none" stroke="#4f8bff" strokeOpacity={0.28} strokeWidth={1.5} />
+            <circle cx={500} cy={500} r={TABLE_R - 70} fill="none" stroke="#9cc4ff" strokeOpacity={0.18} strokeWidth={1} strokeDasharray="2 8" />
+            {/* glass reflection */}
+            <ellipse cx={420} cy={372} rx={150} ry={52} transform="rotate(-28 420 372)" fill="#fff" opacity={0.045} />
 
-            {/* centre star with glow, shadow, pulse and a slow rotating ring */}
+            {/* centre star: glow, shadow, pulse and a slow rotating ring */}
             <g transform="translate(500 500)">
               <circle r={175} fill="url(#wwuStarAura)" />
               <circle className="wwu-ring" r={96} fill="none" stroke="#7fb0ff" strokeOpacity={0.35} strokeWidth={1.2} strokeDasharray="2 9" />
               <g className="wwu-starfx">
-                <g filter="url(#wwuStarBlur)" opacity={0.7} transform="translate(0 14)">
-                  <path d={STAR_D} fill="#000" transform="scale(1.7)" />
-                </g>
-                <g filter="url(#wwuStarBlur)">
-                  <path d={STAR_D} fill="#2f6bff" transform="scale(2.1)" />
-                </g>
-                <g filter="url(#wwuGlow)">
-                  <path d={STAR_D} fill="url(#wwuCoreG)" transform="scale(1.6)" />
-                </g>
+                <circle r={84} fill="url(#wwuStarAura2)" />
+                <path d={STAR_D} fill="#2f6bff" opacity={0.16} transform="scale(2.4)" />
+                <path d={STAR_D} fill="#4f8bff" opacity={0.3} transform="scale(2.0)" />
+                <path d={STAR_D} fill="url(#wwuCoreG)" transform="scale(1.6)" />
                 <path d={STAR_D} fill="#fff" opacity={0.9} transform="scale(0.5)" />
               </g>
             </g>
@@ -2144,9 +1959,10 @@ const CSS = `
 /* animations only run while the section is on screen (nothing is removed) */
 .wwu:not(.live) *,.wwu:not(.live) *::before,.wwu:not(.live) *::after{animation-play-state:paused!important}
 
-/* stars */
+/* stars: only every 3rd one twinkles (cheap), the rest are static */
 .wwu-stars{position:absolute;inset:0;pointer-events:none}
-.wwu-star{position:absolute;border-radius:50%;background:#cfe0ff;opacity:var(--o);animation:wwuTw 5s ease-in-out infinite}
+.wwu-star{position:absolute;border-radius:50%;background:#cfe0ff;opacity:var(--o)}
+.wwu-star:nth-child(3n){animation:wwuTw 5s ease-in-out infinite}
 @keyframes wwuTw{0%,100%{opacity:var(--o)}50%{opacity:.12}}
 
 /* heading */
@@ -2159,19 +1975,18 @@ const CSS = `
 .wwu-now{margin:12px 0 0;font-size:clamp(13px,1vw,16px);color:#8fb0ee;min-height:1.4em;animation:wwuNow .5s ease both}
 @keyframes wwuNow{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-/* scene: slides to the right and shrinks a little when the book starts */
+/* scene: slides to the right and shrinks a little when the book starts (compositor-only) */
 .wwu-scene{position:relative;flex:none;transform-origin:50% 50%;transition:transform 1.1s cubic-bezier(.65,.02,.2,1);will-change:transform}
 .wwu-svg{width:100%;height:100%;display:block;overflow:visible}
-.wwu-person{opacity:.5;transition:opacity .6s ease,transform .6s ease}
-.wwu-person.all{opacity:.9}
+.wwu-person{opacity:.7;transition:opacity .6s ease,transform .6s ease}
+.wwu-person.all{opacity:.92}
 .wwu-person.on{opacity:1;transform:scale(1.07)}
 .wwu-halo{opacity:0;transition:opacity .6s ease;transform-box:fill-box;transform-origin:center}
-.wwu-person.on .wwu-halo{opacity:1;animation:wwuPulse 2.6s ease-in-out infinite}
-@keyframes wwuPulse{0%,100%{transform:scale(.9)}50%{transform:scale(1.08)}}
+.wwu-person.on .wwu-halo{opacity:1}
 
-/* people: life */
+/* people: only the ACTIVE person moves (6 animated people were the main source of lag) */
 .wwu-body,.wwu-headg,.wwu-hand{transform-box:fill-box;transform-origin:center}
-.wwu-body{animation:wwuBreathe 4.6s ease-in-out infinite}
+.wwu-person.on .wwu-body{animation:wwuBreathe 4.6s ease-in-out infinite}
 @keyframes wwuBreathe{0%,100%{transform:scale(1)}50%{transform:scale(1.014)}}
 .wwu-person.on .wwu-headg{animation:wwuNod 3.4s ease-in-out infinite}
 @keyframes wwuNod{0%,100%{transform:rotate(-1.6deg)}50%{transform:rotate(1.6deg) translateY(.8px)}}
@@ -2179,19 +1994,17 @@ const CSS = `
 .wwu-person.on .wwu-hand.r{animation:wwuTypeR .44s ease-in-out .22s infinite}
 @keyframes wwuTypeL{0%,100%{transform:translateY(0)}50%{transform:translateY(2.4px)}}
 @keyframes wwuTypeR{0%,100%{transform:translateY(0)}50%{transform:translateY(2.4px)}}
-.wwu-glow{opacity:.12;transition:opacity .6s ease}
+.wwu-glow{opacity:.35;transition:opacity .6s ease}
 .wwu-person.on .wwu-glow{opacity:1}
-.wwu-logo{opacity:.5;transition:opacity .6s ease}
-.wwu-person.on .wwu-logo{opacity:1}
 
-/* name pills */
+/* name pills (no backdrop-filter: it forced a re-blur of the moving scene every frame) */
 .wwu-lab{position:absolute;z-index:4;display:flex;align-items:center;gap:.6em;padding:.4em .95em .4em .4em;border-radius:999px;
-  border:1px solid rgba(80,140,255,.28);background:rgba(8,16,38,.62);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid rgba(80,140,255,.3);background:rgba(6,14,38,.82);
   color:#9fb4dc;font:inherit;font-size:clamp(11px,.95vw,15px);white-space:nowrap;cursor:pointer;transition:color .5s,border-color .5s,background .5s,box-shadow .5s}
 .wwu-lab b{display:grid;place-items:center;width:1.9em;height:1.9em;border-radius:50%;font-size:.8em;font-weight:700;background:rgba(47,107,255,.16);color:#7fb0ff;transition:background .5s,color .5s}
 .wwu-lab:hover{border-color:#4f8bff}
 .wwu-lab:focus-visible{outline:2px solid #7fb0ff;outline-offset:3px}
-.wwu-lab.on{color:#fff;border-color:#4f8bff;background:rgba(30,80,220,.38);box-shadow:0 0 22px rgba(47,107,255,.55),inset 0 0 12px rgba(47,107,255,.3)}
+.wwu-lab.on{color:#fff;border-color:#4f8bff;background:rgba(30,80,220,.45);box-shadow:0 0 22px rgba(47,107,255,.55),inset 0 0 12px rgba(47,107,255,.3)}
 .wwu-lab.on b{background:#2f6bff;color:#fff}
 .wwu-m .wwu-lab{padding:.25em}
 .wwu-m .wwu-lab span{display:none}
@@ -2204,12 +2017,13 @@ const CSS = `
 .wwu-rise{position:relative;width:100%;height:100%;opacity:0;transform:translateY(70px) scale(.55);transition:opacity .9s ease,transform 1.1s cubic-bezier(.2,.9,.25,1)}
 .wwu-rise.up{opacity:1;transform:none;transition-delay:.45s}
 .wwu-slide{width:100%;height:100%;transition:transform .9s cubic-bezier(.45,.05,.2,1);will-change:transform}
-.wwu-aura{position:absolute;left:-8%;right:-8%;top:-14%;bottom:-14%;background:radial-gradient(ellipse at center,rgba(47,107,255,.38),rgba(47,107,255,0) 68%);filter:blur(14px)}
+/* glow + shadow are plain gradients now (the blur() filters were re-rasterised on every page flip) */
+.wwu-aura{position:absolute;left:-12%;right:-12%;top:-18%;bottom:-18%;background:radial-gradient(ellipse at center,rgba(47,107,255,.34),rgba(47,107,255,0) 68%)}
 .wwu-float{position:relative;width:100%;height:100%;animation:wwuBob 5.5s ease-in-out infinite;will-change:transform}
 @keyframes wwuBob{0%,100%{transform:translateY(-7px)}50%{transform:translateY(8px)}}
 .wwu-tilt{width:100%;height:100%;transform:perspective(1500px) rotateX(13deg)}
-.wwu-shadow{position:absolute;left:10%;right:10%;bottom:-17%;height:11%;background:radial-gradient(ellipse at center,rgba(0,0,0,.65),rgba(0,0,0,0) 70%);filter:blur(9px)}
-.wwu-flip{margin:0 auto;filter:drop-shadow(0 0 22px rgba(47,107,255,.4))}
+.wwu-shadow{position:absolute;left:6%;right:6%;bottom:-19%;height:14%;background:radial-gradient(ellipse at center,rgba(0,0,0,.65),rgba(0,0,0,0) 70%)}
+.wwu-flip{margin:0 auto}
 
 /* ── book pages: same look as the cover (navy, neon blue, silver) ── */
 .wwu-page{overflow:hidden;
@@ -2293,7 +2107,7 @@ const CSS = `
 .wwu-shot .bar i{width:.5em;height:.5em;border-radius:50%;background:#4f8bff}
 .wwu-shot .view{flex:1 1 0;min-height:0;position:relative;overflow:hidden;background:#050d2a}
 .wwu-shot img{position:absolute;inset:0;width:100%;height:100%;display:block}
-.wwu-shot img.bg{object-fit:cover;filter:blur(14px) brightness(.55);transform:scale(1.2)}
+.wwu-shot img.bg{object-fit:cover;filter:blur(10px) brightness(.55);transform:scale(1.2)}
 .wwu-shot img.fg{object-fit:contain;object-position:center}
 .wwu-shot .ph{position:absolute;inset:0;display:grid;place-items:center;padding:.6em;text-align:center;font-weight:800;font-size:.95em;color:#cfe0ff;background:linear-gradient(135deg,#0b1a4a,#02050f)}
 
@@ -2312,12 +2126,17 @@ const CSS = `
 /* centre star */
 .wwu-starfx,.wwu-ring{transform-box:fill-box;transform-origin:center}
 .wwu-starfx{animation:wwuStarPulse 3.6s ease-in-out infinite}
-@keyframes wwuStarPulse{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.07);opacity:1}}
+@keyframes wwuStarPulse{0%,100%{transform:scale(1);opacity:.88}50%{transform:scale(1.06);opacity:1}}
 .wwu-ring{animation:wwuSpin 40s linear infinite}
 @keyframes wwuSpin{to{transform:rotate(360deg)}}
 
+/* weak devices: keep everything visible, drop the ambient motion */
+.wwu-lite .wwu-star,.wwu-lite .wwu-float,.wwu-lite .wwu-starfx,.wwu-lite .wwu-ring,
+.wwu-lite .wwu-person .wwu-body,.wwu-lite .wwu-person .wwu-headg,.wwu-lite .wwu-person .wwu-eyes{animation:none!important}
+.wwu-lite .wwu-aura{opacity:.6}
+
 @media (prefers-reduced-motion:reduce){
-  .wwu-star,.wwu-float,.wwu-person.on .wwu-halo,.wwu-body,.wwu-person.on .wwu-headg,.wwu-person.on .wwu-hand,.wwu-starfx,.wwu-ring{animation:none}
+  .wwu-star,.wwu-float,.wwu-person.on .wwu-body,.wwu-person.on .wwu-headg,.wwu-person.on .wwu-hand,.wwu-starfx,.wwu-ring{animation:none}
   .wwu-rise,.wwu-scene,.wwu-slide{transition:none}
 }
 `;

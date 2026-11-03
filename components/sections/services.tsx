@@ -6,6 +6,8 @@ import React, {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useCallback,
+  memo,
 } from "react";
 import {
   motion,
@@ -17,10 +19,22 @@ import {
   useTransform,
 } from "motion/react";
 
+/* =====================================================================
+   PERFORMANCE NOTES (what changed vs. the previous version)
+   - Open-only parts (hardcover boards, page stacks, fold, left page, right page)
+     are mounted only when a book is hovered / focused / opened, not for all 7 books at load.
+   - Grain textures (SVG noise) switch on after first paint via [data-fx] (idle callback).
+   - Star canvases render at 1x DPR (3 full-size canvases were ~4x heavier at 1.5x),
+     the twinkle pauses while the section is off-screen, and low-end devices get a static sky.
+   - content-visibility:auto skips rendering the whole section until it nears the viewport.
+   - Removed the big drop-shadow filter and the mix-blend-soft-light layers (both are slow on weak GPUs).
+   - ServiceCard is memoized with stable callbacks, so opening one book doesn't re-render the other six.
+   - will-change is only set while a card is being dragged.
+   ===================================================================== */
+
 // Space background that fills only its parent section (the parent must be position: relative).
 // Stars are drawn ONCE onto 3 small canvases (no animation loop). The twinkle is a CSS opacity
-// fade on each canvas with a different duration/delay, so it runs on the GPU compositor
-// and costs almost nothing on the main thread.
+// fade on each canvas with a different duration/delay, so it runs on the GPU compositor.
 type Star = { x: number; y: number; r: number; a: number; color: string };
 
 const TWINKLE_LAYERS = 3;
@@ -34,6 +48,8 @@ const TWINKLE_CSS = `
   .sb-layer-0 { animation-duration: 3s; animation-delay: 0s; }
   .sb-layer-1 { animation-duration: 4.5s; animation-delay: -1.5s; }
   .sb-layer-2 { animation-duration: 6s; animation-delay: -3s; }
+  .sb-paused .sb-layer { animation-play-state: paused; will-change: auto; }
+  .sb-lite .sb-layer { animation: none; opacity: 0.8; will-change: auto; }
   @media (prefers-reduced-motion: reduce) {
     .sb-layer { animation: none; opacity: 0.8; will-change: auto; }
   }
@@ -48,7 +64,13 @@ const SpaceBackdrop = () => {
     const canvases = canvasRefs.current.filter(Boolean) as HTMLCanvasElement[];
     if (!wrap || canvases.length !== TWINKLE_LAYERS) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    // 1x is plenty for 1-3px stars and uses far less GPU memory than 1.5x
+    const dpr = 1;
+
+    // weak devices: fewer stars and a static sky (no twinkle animation)
+    const nav = navigator as Navigator & { deviceMemory?: number };
+    const lite = (nav.hardwareConcurrency ?? 8) <= 4 || (nav.deviceMemory ?? 8) <= 2;
+    if (lite) wrap.classList.add("sb-lite");
 
     // star positions are stored as 0..1 so a resize redraws the same sky
     const stars: Star[] = Array.from({ length: 180 }, () => {
@@ -66,13 +88,21 @@ const SpaceBackdrop = () => {
     });
 
     let raf = 0;
-    const draw = () => {
-      const w = wrap.clientWidth;
-      const h = wrap.clientHeight;
-      if (!w || !h) return;
+    let timer = 0;
+    let drawnW = 0;
+    let drawnH = 0;
+    const host = wrap.parentElement ?? wrap;
 
-      // fewer stars on small screens / small sections
-      const count = Math.min(stars.length, Math.round((w * h) / (w < 768 ? 12000 : 9000)));
+    const draw = () => {
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      if (!w || !h) return;
+      drawnW = w;
+      drawnH = h;
+
+      // fewer stars on small screens / small sections / weak devices
+      const density = (w < 768 ? 12000 : 9000) * (lite ? 2 : 1);
+      const count = Math.min(stars.length, Math.round((w * h) / density));
 
       canvases.forEach((canvas, layer) => {
         const ctx = canvas.getContext("2d");
@@ -104,18 +134,29 @@ const SpaceBackdrop = () => {
       });
     };
 
-    const schedule = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(draw);
-    };
+    // first draw is immediate; later resizes are debounced and ignored if the size didn't change
+    raf = requestAnimationFrame(draw);
+    const ro = new ResizeObserver(() => {
+      if (host.clientWidth === drawnW && host.clientHeight === drawnH) return;
+      clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(draw);
+      }, 150);
+    });
+    ro.observe(host);
 
-    schedule();
-    const ro = new ResizeObserver(schedule);
-    ro.observe(wrap);
+    // pause the CSS twinkle while the section is off-screen
+    const io = new IntersectionObserver(([e]) => {
+      wrap.classList.toggle("sb-paused", !e.isIntersecting);
+    });
+    io.observe(wrap);
 
     return () => {
+      clearTimeout(timer);
       cancelAnimationFrame(raf);
       ro.disconnect();
+      io.disconnect();
     };
   }, []);
 
@@ -257,11 +298,14 @@ export const DraggableCardBody = ({
       onDragStart={() => {
         document.body.style.cursor = "grabbing";
         document.body.style.userSelect = "none";
+        // only promote the card to its own layer while it is actually moving
+        if (cardRef.current) cardRef.current.style.willChange = "transform";
         window.getSelection()?.removeAllRanges();
       }}
       onDragEnd={() => {
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
+        if (cardRef.current) cardRef.current.style.willChange = "";
         mouseX.set(0);
         mouseY.set(0);
       }}
@@ -271,7 +315,6 @@ export const DraggableCardBody = ({
         y,
         rotateX,
         rotateY,
-        willChange: "transform",
       }}
       whileHover={flat || touch ? undefined : { scale: 1.02 }}
       onMouseMove={handleMouseMove}
@@ -411,7 +454,10 @@ type Service = {
   accent: string; // bright rgb triplet: glow / highlights
   base: string; // deep rgb triplet: leather color of the book
   image?: string; // e.g. "/services/web-development.jpg"
-  features: Feature[];
+  features: Feature[]; // page 1
+  about: string; // page 2 intro paragraph
+  steps: [string, string][]; // page 2: [title, description] x3
+  faqs: [string, string][]; // page 3: [question, answer] x2
   className: string; // tilt of the card in the pile (kept as literal classes so Tailwind sees them)
 };
 
@@ -457,6 +503,8 @@ const LEATHER_LIGHT = makeNoise(0.9, [1, 1, 0.95], 1.4, -0.82, 180);
 const EDGE_NOISE = makeNoise(1.1, [0.35, 0.27, 0.14], 1.2, -0.3);
 
 // Layered page edges + page stacks are built from ::before / ::after (no static images).
+// Grain textures only switch on once the section has set data-fx (after first paint / idle),
+// so the books appear immediately and the noise fades in afterwards.
 const BOOK_CSS = `
   .sb-edge {
     background-color: #e6d9b6;
@@ -473,8 +521,17 @@ const BOOK_CSS = `
   }
   .sb-edge::after {
     content: ""; position: absolute; inset: 0; pointer-events: none;
-    background-image: ${EDGE_NOISE}; background-size: 240px 240px; opacity: 0.5;
+    background-size: 240px 240px; opacity: 0.5;
   }
+  [data-fx] .sb-edge::after { background-image: ${EDGE_NOISE}; }
+  /* leather grain overlay for spine / back cover / hardcover boards */
+  .sb-lt::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none; background-size: 240px 240px;
+  }
+  [data-fx] .sb-lt::after { background-image: ${LEATHER_DARK}; }
+  /* matte cloth grain on the front cover */
+  .sb-grain { background-size: 180px 180px, 240px 240px; }
+  [data-fx] .sb-grain { background-image: ${LEATHER_LIGHT}, ${LEATHER_DARK}; }
   /* the pages stacked under the open spread: two offset leaves give real thickness */
   .sb-stack::before, .sb-stack::after {
     content: ""; position: absolute; inset: 0; border-radius: 2px; z-index: -1;
@@ -517,6 +574,8 @@ const BookCover = ({
           src={image}
           alt={title}
           draggable={false}
+          loading="lazy"
+          decoding="async"
           onError={() => setImgFailed(true)}
           className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
@@ -544,22 +603,19 @@ const BookCover = ({
           background: `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
         }}
       />
+      {/* accent tint (plain translucent layer: blend modes are slow on low-end GPUs) */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-75 mix-blend-soft-light"
+        className="pointer-events-none absolute inset-0 opacity-30"
         style={{
           background: `linear-gradient(135deg, rgba(${accent},0.6), transparent 60%)`,
         }}
       />
 
-      {/* matte cloth / leather grain */}
+      {/* matte cloth / leather grain (switched on after first paint, see BOOK_CSS) */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-60"
-        style={{
-          backgroundImage: `${LEATHER_LIGHT}, ${LEATHER_DARK}`,
-          backgroundSize: "180px 180px, 240px 240px",
-        }}
+        className="sb-grain pointer-events-none absolute inset-0 opacity-60"
       />
       {/* edge wear: the board is slightly darker where hands hold it */}
       <div
@@ -674,6 +730,7 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
           src={image}
           alt={title}
           draggable={false}
+          decoding="async"
           onError={() => setImgFailed(true)}
           className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
@@ -700,7 +757,7 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
       />
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 mix-blend-soft-light"
+        className="pointer-events-none absolute inset-0 opacity-40"
         style={{ background: `linear-gradient(135deg, rgba(${accent},0.5), transparent 65%)` }}
       />
       {/* soft inner shadow around the page boundary */}
@@ -743,7 +800,7 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
           className="font-serif text-[14px] tracking-[0.35em]"
           style={{ color: `rgb(${GOLD})` }}
         >
-          {String(index + 1).padStart(2, "0")} / 07
+          {String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
         </span>
         <h3
           className="mt-3 font-serif text-[44px] leading-[1.05] font-semibold"
@@ -771,13 +828,15 @@ const LeftPage = ({ service, index }: { service: Service; index: number }) => {
   );
 };
 
-/* ---------------- Right page (a real paper page with the details) ---------------- */
+/* ---------------- Right page (a real paper page, now with 3 scrollable pages) ---------------- */
 
 const BOOK_FONT =
   "'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,Georgia,serif";
 const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
 const INK = "rgba(38,25,10,0.92)";
 const INK_SOFT = "rgba(86,62,28,0.85)";
+const PAGE_TITLES = ["What\u2019s included", "How it works", "Good to know"];
+const PAGE_COUNT = PAGE_TITLES.length;
 
 // "r,g,b" -> darker "r,g,b"
 const shade = (rgb: string, k: number) =>
@@ -822,9 +881,53 @@ const RightPage = ({
   open: boolean;
   onClose: () => void;
 }) => {
-  const { accent, features } = service;
+  const { title, accent, features, about, steps, faqs } = service;
   const dark = shade(accent, 0.55); // ink colour for icons / rings
   const btnTop = shade(accent, 0.74);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [pg, setPg] = useState(0);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // scrolling / grabbing the page must not drag the whole book around
+    const stop = (e: Event) => e.stopPropagation();
+    let raf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        let best = 0;
+        for (let i = 0; i < el.children.length; i++) {
+          if ((el.children[i] as HTMLElement).offsetTop - el.scrollTop <= el.clientHeight / 2) best = i;
+        }
+        setPg(best);
+      });
+    };
+    el.addEventListener("pointerdown", stop);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("pointerdown", stop);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, []);
+
+  const goTo = (i: number) => {
+    const el = scrollRef.current;
+    const target = el?.children[Math.min(PAGE_COUNT - 1, Math.max(0, i))] as HTMLElement | undefined;
+    if (!el || !target) return;
+    el.scrollTo({
+      top: target.offsetTop,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  };
+
+  const stamp = {
+    color: `rgb(${dark})`,
+    border: `1.5px solid rgba(${dark},0.7)`,
+    background: `radial-gradient(circle at 35% 30%, rgba(${accent},0.3), rgba(${accent},0.1))`,
+  } as const;
 
   return (
     <div
@@ -926,7 +1029,7 @@ const RightPage = ({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="absolute top-8 right-8 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border text-lg leading-none transition-colors hover:bg-black/10"
+          className="absolute top-8 right-8 z-10 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border text-lg leading-none transition-colors hover:bg-black/10"
           style={{
             borderColor: "rgba(80,55,20,0.45)",
             color: INK,
@@ -941,49 +1044,109 @@ const RightPage = ({
           className="text-[10px] font-semibold tracking-[0.4em] uppercase"
           style={{ color: INK_SOFT }}
         >
-          Chapter {ROMAN[index] ?? index + 1}
+          Chapter {ROMAN[index] ?? index + 1} · Page {pg + 1}/{PAGE_COUNT}
         </span>
-        <h4
-          className="mt-1 text-[30px] leading-none font-normal italic"
-          style={{ color: INK }}
-        >
-          What&apos;s included
-        </h4>
-        <Flourish className="mt-3 w-[170px]" />
 
-        <div className="mt-3 flex flex-1 flex-col justify-center">
-          {features.map((f, i) => (
-            <motion.div
-              key={f.title}
-              initial={false}
-              animate={{ opacity: open ? 1 : 0, y: open ? 0 : 10 }}
-              transition={{ duration: 0.4, delay: open ? 0.85 + i * 0.1 : 0 }}
-            >
-              <div className="flex items-center gap-4 py-3">
-                {/* ink-stamp style icon */}
-                <div
-                  className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full"
-                  style={{
-                    color: `rgb(${dark})`,
-                    border: `1.5px solid rgba(${dark},0.7)`,
-                    background: `radial-gradient(circle at 35% 30%, rgba(${accent},0.3), rgba(${accent},0.1))`,
-                    boxShadow: `inset 0 0 0 3px rgba(255,248,225,0.5), inset 0 0 0 4px rgba(${dark},0.35)`,
-                  }}
+        {/* the 3 pages: scroll (wheel / swipe / arrow keys) or use the dots below */}
+        <div
+          ref={scrollRef}
+          tabIndex={0}
+          role="region"
+          aria-label={`${title}: details, page ${pg + 1} of ${PAGE_COUNT}`}
+          className="relative mt-1 min-h-0 flex-1 snap-y snap-mandatory overflow-y-auto overscroll-contain rounded-[2px] outline-none [scrollbar-width:none] focus-visible:ring-1 focus-visible:ring-[#8a6a2a]/60 [&::-webkit-scrollbar]:hidden"
+          style={{ touchAction: "pan-y" }}
+        >
+          {/* page 1: what's included */}
+          <section className="flex min-h-full snap-start flex-col">
+            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
+              {PAGE_TITLES[0]}
+            </h4>
+            <Flourish className="mt-3 w-[170px]" />
+
+            <div className="mt-3 flex flex-1 flex-col justify-center">
+              {features.map((f, i) => (
+                <motion.div
+                  key={f.title}
+                  initial={false}
+                  animate={{ opacity: open ? 1 : 0, y: open ? 0 : 10 }}
+                  transition={{ duration: 0.4, delay: open ? 0.85 + i * 0.1 : 0 }}
                 >
-                  {f.icon}
-                </div>
-                <div>
-                  <div className="text-[16px] leading-tight font-semibold" style={{ color: INK }}>
-                    {f.title}
+                  <div className="flex items-center gap-4 py-3">
+                    {/* ink-stamp style icon */}
+                    <div
+                      className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full"
+                      style={{
+                        ...stamp,
+                        boxShadow: `inset 0 0 0 3px rgba(255,248,225,0.5), inset 0 0 0 4px rgba(${dark},0.35)`,
+                      }}
+                    >
+                      {f.icon}
+                    </div>
+                    <div>
+                      <div className="text-[16px] leading-tight font-semibold" style={{ color: INK }}>
+                        {f.title}
+                      </div>
+                      <div className="mt-0.5 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
+                        {f.desc}
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-0.5 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
-                    {f.desc}
+                  {i < features.length - 1 && <Flourish className="opacity-70" />}
+                </motion.div>
+              ))}
+            </div>
+          </section>
+
+          {/* page 2: how it works */}
+          <section className="flex min-h-full snap-start flex-col">
+            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
+              {PAGE_TITLES[1]}
+            </h4>
+            <Flourish className="mt-3 w-[170px]" />
+            <p className="mt-3 text-[13.5px] leading-snug italic" style={{ color: INK_SOFT }}>
+              {about}
+            </p>
+            <ol className="mt-3 flex flex-1 flex-col justify-center gap-3">
+              {steps.map(([t, d], i) => (
+                <li key={t} className="flex items-center gap-3">
+                  <span
+                    className="flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-full text-[15px] font-semibold"
+                    style={stamp}
+                  >
+                    {i + 1}
+                  </span>
+                  <div>
+                    <div className="text-[15px] leading-tight font-semibold" style={{ color: INK }}>
+                      {t}
+                    </div>
+                    <div className="mt-0.5 text-[12.5px] leading-snug italic" style={{ color: INK_SOFT }}>
+                      {d}
+                    </div>
                   </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+
+          {/* page 3: FAQ */}
+          <section className="flex min-h-full snap-start flex-col">
+            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
+              {PAGE_TITLES[2]}
+            </h4>
+            <Flourish className="mt-3 w-[170px]" />
+            <div className="mt-3 flex flex-1 flex-col justify-center gap-5">
+              {faqs.map(([q, a]) => (
+                <div key={q}>
+                  <h5 className="text-[15px] leading-tight font-semibold" style={{ color: INK }}>
+                    {q}
+                  </h5>
+                  <p className="mt-1 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
+                    {a}
+                  </p>
                 </div>
-              </div>
-              {i < features.length - 1 && <Flourish className="opacity-70" />}
-            </motion.div>
-          ))}
+              ))}
+            </div>
+          </section>
         </div>
 
         <a
@@ -1006,12 +1169,43 @@ const RightPage = ({
           Get Started <span>→</span>
         </a>
 
-        <span
-          className="absolute right-0 bottom-[24px] left-0 text-center text-[11px] tracking-[0.3em] italic"
-          style={{ color: "rgba(90,65,25,0.6)" }}
-        >
-          — {index * 2 + 2} —
-        </span>
+        {/* pager: prev / dots / next */}
+        <div className="absolute right-0 bottom-[22px] left-0 flex items-center justify-center gap-3">
+          <button
+            type="button"
+            aria-label="Previous page"
+            disabled={pg === 0}
+            onClick={() => goTo(pg - 1)}
+            className="flex h-5 w-5 cursor-pointer items-center justify-center text-[18px] leading-none transition-opacity disabled:cursor-default disabled:opacity-25"
+            style={{ color: INK_SOFT }}
+          >
+            ‹
+          </button>
+          {PAGE_TITLES.map((t, i) => (
+            <button
+              key={t}
+              type="button"
+              aria-label={`Go to page ${i + 1}: ${t}`}
+              aria-current={pg === i}
+              onClick={() => goTo(i)}
+              className="h-[7px] cursor-pointer rounded-full transition-all"
+              style={{
+                width: pg === i ? 18 : 7,
+                background: pg === i ? INK_SOFT : "rgba(90,65,25,0.28)",
+              }}
+            />
+          ))}
+          <button
+            type="button"
+            aria-label="Next page"
+            disabled={pg === PAGE_COUNT - 1}
+            onClick={() => goTo(pg + 1)}
+            className="flex h-5 w-5 cursor-pointer items-center justify-center text-[18px] leading-none transition-opacity disabled:cursor-default disabled:opacity-25"
+            style={{ color: INK_SOFT }}
+          >
+            ›
+          </button>
+        </div>
       </motion.div>
 
       {/* turned-up page corner */}
@@ -1048,7 +1242,7 @@ const COVER_EASE = [0.55, 0.02, 0.2, 1] as const;
 const edgeVars = (dir: string, base: string) =>
   ({ "--d": dir, "--board": `rgb(${base})` }) as React.CSSProperties;
 
-const ServiceCard = ({
+const ServiceCardBase = ({
   service,
   index,
   unit,
@@ -1061,7 +1255,7 @@ const ServiceCard = ({
   index: number;
   unit: number; // card size relative to desktop (0.55 - 1)
   open: boolean;
-  onOpen: () => void;
+  onOpen: (index: number) => void;
   onClose: () => void;
   /** tells the parent how big the open book is, so dragging can keep it inside the section */
   onFit?: (fit: { scale: number; dx: number; dy: number }) => void;
@@ -1076,10 +1270,20 @@ const ServiceCard = ({
   const onFitRef = useRef(onFit);
   onFitRef.current = onFit;
 
+  // The heavy "open book" parts (boards, page stacks, fold, both pages) only exist in the DOM
+  // while the book is open, or just before (hover / focus / press) and just after (close animation).
+  const [warm, setWarm] = useState(false);
+  const show = open || warm;
+  useEffect(() => {
+    if (open || !warm) return;
+    const id = setTimeout(() => setWarm(false), 1600);
+    return () => clearTimeout(id);
+  }, [open, warm]);
+
   // the info page sits under the cover while closed: keep its links out of the tab order / screen readers
   useEffect(() => {
     pageRef.current?.toggleAttribute("inert", !open);
-  }, [open]);
+  }, [open, show]);
 
   // when opening, work out how big the open book can be and how far to nudge it so it stays inside the section
   useEffect(() => {
@@ -1134,18 +1338,25 @@ const ServiceCard = ({
       onKeyDown={(e) => {
         if (!open && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
-          onOpen();
+          onOpen(index);
         }
       }}
-      onPointerEnter={(e) => e.pointerType === "mouse" && setHovered(true)}
+      onFocus={() => setWarm(true)}
+      onPointerEnter={(e) => {
+        if (e.pointerType === "mouse") {
+          setHovered(true);
+          setWarm(true);
+        }
+      }}
       onPointerLeave={() => setHovered(false)}
       onPointerDown={(e) => {
         down.current = { x: e.clientX, y: e.clientY };
+        setWarm(true);
       }}
       onPointerUp={(e) => {
         const d = down.current;
         down.current = null;
-        if (!open && d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) onOpen();
+        if (!open && d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) onOpen(index);
       }}
     >
       {/* anchor at the card centre */}
@@ -1165,8 +1376,6 @@ const ServiceCard = ({
             height: PAGE_H,
             marginLeft: -PAGE_W,
             marginTop: -PAGE_H / 2,
-            // restrained: a whisper of the accent + a soft cast shadow (the contact shadow is below)
-            filter: `drop-shadow(0 0 14px rgba(${accent},0.1)) drop-shadow(0 8px 10px rgba(0,0,0,0.35))`,
           }}
         >
           {/* ambient occlusion + contact shadow under the book (widens when the book opens) */}
@@ -1199,66 +1408,69 @@ const ServiceCard = ({
               transition={t}
               style={{ transformStyle: "preserve-3d", transformOrigin: "75% 50%" }}
             >
-              {/* hardcover boards (they stick out a little past the pages), left half */}
-              <motion.div
-                aria-hidden
-                className="absolute rounded-l-lg"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
-                style={{
-                  z: -THICK / 2,
-                  top: -12,
-                  left: -14,
-                  width: PAGE_W + 14,
-                  height: PAGE_H + 24,
-                  backgroundImage: `${LEATHER_DARK}, linear-gradient(145deg, rgb(${base}), #050a22 80%)`,
-                  backgroundSize: "240px 240px, auto",
-                  border: `1px solid rgba(${GOLD},0.4)`,
-                  boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
-                }}
-              />
-              {/* hardcover boards, right half */}
-              <motion.div
-                aria-hidden
-                className="absolute rounded-r-lg"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
-                style={{
-                  z: -THICK / 2,
-                  top: -12,
-                  left: PAGE_W,
-                  width: PAGE_W + 14,
-                  height: PAGE_H + 24,
-                  backgroundImage: `${LEATHER_DARK}, linear-gradient(215deg, rgb(${base}), #050a22 80%)`,
-                  backgroundSize: "240px 240px, auto",
-                  border: `1px solid rgba(${GOLD},0.4)`,
-                  boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
-                }}
-              />
+              {/* open-book parts: only mounted when needed */}
+              {show && (
+                <>
+                  {/* hardcover boards (they stick out a little past the pages), left half */}
+                  <motion.div
+                    aria-hidden
+                    className="sb-lt absolute rounded-l-lg"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
+                    style={{
+                      z: -THICK / 2,
+                      top: -12,
+                      left: -14,
+                      width: PAGE_W + 14,
+                      height: PAGE_H + 24,
+                      backgroundImage: `linear-gradient(145deg, rgb(${base}), #050a22 80%)`,
+                      border: `1px solid rgba(${GOLD},0.4)`,
+                      boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
+                    }}
+                  />
+                  {/* hardcover boards, right half */}
+                  <motion.div
+                    aria-hidden
+                    className="sb-lt absolute rounded-r-lg"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
+                    style={{
+                      z: -THICK / 2,
+                      top: -12,
+                      left: PAGE_W,
+                      width: PAGE_W + 14,
+                      height: PAGE_H + 24,
+                      backgroundImage: `linear-gradient(215deg, rgb(${base}), #050a22 80%)`,
+                      border: `1px solid rgba(${GOLD},0.4)`,
+                      boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
+                    }}
+                  />
 
-              {/* page stacks under the open spread (layered leaves via ::before / ::after) */}
-              <motion.div
-                aria-hidden
-                className="sb-stack sb-stack-l absolute"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
-                style={{ z: -2, left: 0, top: 0, width: PAGE_W, height: PAGE_H }}
-              />
-              <motion.div
-                aria-hidden
-                className="sb-stack sb-stack-r absolute"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
-                style={{ z: -2, left: PAGE_W, top: 0, width: PAGE_W, height: PAGE_H }}
-              />
+                  {/* page stacks under the open spread (layered leaves via ::before / ::after) */}
+                  <motion.div
+                    aria-hidden
+                    className="sb-stack sb-stack-l absolute"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
+                    style={{ z: -2, left: 0, top: 0, width: PAGE_W, height: PAGE_H }}
+                  />
+                  <motion.div
+                    aria-hidden
+                    className="sb-stack sb-stack-r absolute"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
+                    style={{ z: -2, left: PAGE_W, top: 0, width: PAGE_W, height: PAGE_H }}
+                  />
+                </>
+              )}
 
               {/* back cover (closed 3D book only) */}
               <motion.div
-                className="absolute rounded-md"
+                className="sb-lt absolute rounded-md"
                 initial={false}
                 animate={faceFade}
                 transition={faceT}
@@ -1269,14 +1481,13 @@ const ServiceCard = ({
                   top: 0,
                   width: PAGE_W,
                   height: PAGE_H,
-                  backgroundImage: `${LEATHER_DARK}, linear-gradient(150deg, rgb(${base}), #02040f)`,
-                  backgroundSize: "240px 240px, auto",
+                  backgroundImage: `linear-gradient(150deg, rgb(${base}), #02040f)`,
                 }}
               />
 
               {/* spine: rounded like a real binding */}
               <motion.div
-                className="pointer-events-auto absolute top-0 flex items-center justify-center overflow-hidden"
+                className="sb-lt pointer-events-auto absolute top-0 flex items-center justify-center overflow-hidden"
                 initial={false}
                 animate={faceFade}
                 transition={faceT}
@@ -1285,8 +1496,7 @@ const ServiceCard = ({
                   left: PAGE_W - THICK / 2,
                   width: THICK,
                   height: PAGE_H,
-                  backgroundImage: `${LEATHER_DARK}, linear-gradient(90deg, rgba(0,0,0,0.65), rgb(${base}) 16%, rgba(${accent},0.22) 42%, rgba(255,255,255,0.05) 50%, rgb(${base}) 66%, rgba(0,0,0,0.7))`,
-                  backgroundSize: "240px 240px, auto",
+                  backgroundImage: `linear-gradient(90deg, rgba(0,0,0,0.65), rgb(${base}) 16%, rgba(${accent},0.22) 42%, rgba(255,255,255,0.05) 50%, rgb(${base}) 66%, rgba(0,0,0,0.7))`,
                   boxShadow: "inset 0 0 14px rgba(0,0,0,0.5)",
                 }}
               >
@@ -1361,39 +1571,43 @@ const ServiceCard = ({
                 }}
               />
 
-              {/* right page (paper) - sits under the cover and is revealed as it swings open */}
-              <motion.div
-                ref={pageRef}
-                className="absolute top-0"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.2, delay: open ? 0 : 0.95 }}
-                style={{
-                  left: PAGE_W,
-                  width: PAGE_W,
-                  height: PAGE_H,
-                  pointerEvents: open ? "auto" : "none",
-                }}
-              >
-                <RightPage service={service} index={index} open={open} onClose={onClose} />
-              </motion.div>
+              {show && (
+                <>
+                  {/* right page (paper, 3 scrollable pages) - sits under the cover and is revealed as it swings open */}
+                  <motion.div
+                    ref={pageRef}
+                    className="absolute top-0"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.2, delay: open ? 0 : 0.95 }}
+                    style={{
+                      left: PAGE_W,
+                      width: PAGE_W,
+                      height: PAGE_H,
+                      pointerEvents: open ? "auto" : "none",
+                    }}
+                  >
+                    <RightPage service={service} index={index} open={open} onClose={onClose} />
+                  </motion.div>
 
-              {/* the fold: both pages curve down into the centre of the spread */}
-              <motion.div
-                aria-hidden
-                className="pointer-events-none absolute top-0"
-                initial={false}
-                animate={{ opacity: open ? 1 : 0 }}
-                transition={{ duration: 0.5, delay: open ? 0.55 : 0 }}
-                style={{
-                  z: 3,
-                  left: PAGE_W - 46,
-                  width: 92,
-                  height: PAGE_H,
-                  background:
-                    "linear-gradient(90deg, transparent, rgba(25,14,3,0.22) 38%, rgba(15,8,0,0.42) 50%, rgba(25,14,3,0.22) 62%, transparent)",
-                }}
-              />
+                  {/* the fold: both pages curve down into the centre of the spread */}
+                  <motion.div
+                    aria-hidden
+                    className="pointer-events-none absolute top-0"
+                    initial={false}
+                    animate={{ opacity: open ? 1 : 0 }}
+                    transition={{ duration: 0.5, delay: open ? 0.55 : 0 }}
+                    style={{
+                      z: 3,
+                      left: PAGE_W - 46,
+                      width: 92,
+                      height: PAGE_H,
+                      background:
+                        "linear-gradient(90deg, transparent, rgba(25,14,3,0.22) 38%, rgba(15,8,0,0.42) 50%, rgba(25,14,3,0.22) 62%, transparent)",
+                    }}
+                  />
+                </>
+              )}
 
               {/* the cover: front = cover art, back = inside of the cover; swings around the spine */}
               <motion.div
@@ -1433,7 +1647,7 @@ const ServiceCard = ({
                   className="absolute inset-0"
                   style={{ ...hidden, transform: "rotateY(180deg) translateZ(0.5px)" }}
                 >
-                  <LeftPage service={service} index={index} />
+                  {show && <LeftPage service={service} index={index} />}
                   <motion.div
                     aria-hidden
                     className="pointer-events-none absolute inset-0"
@@ -1455,6 +1669,9 @@ const ServiceCard = ({
     </div>
   );
 };
+
+// memoized: opening / dragging one book doesn't re-render the other six
+const ServiceCard = memo(ServiceCardBase);
 
 /* ---------------- Full-screen sheet (phones, small windows, landscape phones) ---------------- */
 // The open book would be unreadably small on a phone, so there the details open as a scrollable sheet.
@@ -1529,6 +1746,7 @@ const ServiceSheet = ({
 // Put your images in /public/services/ and they show up on the cover and the left page.
 // Until the file exists, a placeholder is shown.
 // `base` values are the original ones multiplied by ~0.78 (a little darker).
+// Each book has 3 pages: features (page 1), about + steps (page 2), FAQ (page 3).
 const SERVICES: Service[] = [
   {
     title: "Web Development",
@@ -1544,6 +1762,16 @@ const SERVICES: Service[] = [
       { icon: <DevicesIcon />, title: "Responsive Design", desc: "Looks perfect on every device." },
       { icon: <BoltIcon />, title: "Performance Focused", desc: "Optimized for speed and better user experience." },
       { icon: <HeadsetIcon />, title: "Ongoing Support", desc: "We're here even after launch." },
+    ],
+    about: "We design and code fast, secure websites and web apps in Next.js and React, so your business looks sharp and loads quickly on every device.",
+    steps: [
+      ["Discover", "We learn your goals, audience and budget."],
+      ["Design & Build", "Clean design, then responsive, SEO-ready code."],
+      ["Launch & Support", "Testing, go-live and help afterwards."],
+    ],
+    faqs: [
+      ["How long does a website take?", "Most business sites launch in two to six weeks, depending on the pages and features."],
+      ["Will my site rank on Google?", "Every site ships with clean markup, fast loading and on-page SEO basics."],
     ],
     className: "rotate-[-5deg]",
   },
@@ -1562,6 +1790,16 @@ const SERVICES: Service[] = [
       { icon: <ChartIcon />, title: "Conversion Focused", desc: "Built to turn visitors into enquiries." },
       { icon: <BoltIcon />, title: "Faster & Mobile-Ready", desc: "Quicker load times on every screen." },
     ],
+    about: "Already have a site that feels dated or slow? We rebuild the look, structure and speed while keeping the content and rankings that already work.",
+    steps: [
+      ["Audit", "We review design, speed, SEO and analytics."],
+      ["Redesign", "A new layout and visuals that match your brand."],
+      ["Migrate & Launch", "Redirects keep your existing rankings safe."],
+    ],
+    faqs: [
+      ["Will I lose my Google rankings?", "No. We map every old URL to the new one with proper redirects."],
+      ["Can you keep my existing content?", "Yes. We reuse what performs well and rewrite what doesn't."],
+    ],
     className: "rotate-[-7deg]",
   },
   {
@@ -1578,6 +1816,16 @@ const SERVICES: Service[] = [
       { icon: <ShieldIcon />, title: "Security Monitoring", desc: "Threats caught and fixed before they hurt." },
       { icon: <CheckIcon />, title: "Backups & Recovery", desc: "Restore quickly if anything goes wrong." },
       { icon: <BoltIcon />, title: "Speed Fixes", desc: "Ongoing performance tuning." },
+    ],
+    about: "A neglected website gets slow and vulnerable. We keep yours updated, backed up and fast with a simple monthly care plan.",
+    steps: [
+      ["Health Check", "We scan security, speed and broken links."],
+      ["Monthly Care", "Updates, backups and uptime monitoring."],
+      ["Report", "A short monthly summary of what we fixed."],
+    ],
+    faqs: [
+      ["What if my site gets hacked?", "We restore a clean backup and close the security gap."],
+      ["Do you maintain sites you didn't build?", "Yes, on most platforms after a quick review."],
     ],
     className: "rotate-[8deg]",
   },
@@ -1596,6 +1844,16 @@ const SERVICES: Service[] = [
       { icon: <LayoutIcon />, title: "Content Strategy", desc: "Pages built around what people search for." },
       { icon: <ChartIcon />, title: "Reports & Tracking", desc: "Clear monthly progress you can see." },
     ],
+    about: "We improve your site's technical health, content and authority so the right customers find you on Google every month.",
+    steps: [
+      ["Audit & Keywords", "Find what customers search and where you stand."],
+      ["Optimize", "Fix technical issues and improve key pages."],
+      ["Grow & Report", "Build content and links, then track results."],
+    ],
+    faqs: [
+      ["How long does SEO take?", "Early gains often show in two to three months; stronger results build over six."],
+      ["Do you guarantee the number one spot?", "No honest agency can. We commit to clear work and visible progress."],
+    ],
     className: "rotate-[10deg]",
   },
   {
@@ -1612,6 +1870,16 @@ const SERVICES: Service[] = [
       { icon: <MegaphoneIcon />, title: "Display & Remarketing", desc: "Bring past visitors back to your site." },
       { icon: <ChartIcon />, title: "Conversion Tracking", desc: "Know exactly what each click delivers." },
       { icon: <BoltIcon />, title: "Budget Optimization", desc: "More results from every rupee spent." },
+    ],
+    about: "We run search campaigns aimed at people ready to call or buy, and track every click so your budget goes where it pays back.",
+    steps: [
+      ["Plan", "Keywords, budget and target locations."],
+      ["Launch", "Ads, landing pages and conversion tracking."],
+      ["Optimize", "Weekly tweaks to lower your cost per lead."],
+    ],
+    faqs: [
+      ["What budget do I need?", "Many local businesses start with a modest monthly spend and scale as leads arrive."],
+      ["When will I see leads?", "Usually within days of launch, improving as we optimize."],
     ],
     className: "rotate-[2deg]",
   },
@@ -1630,6 +1898,16 @@ const SERVICES: Service[] = [
       { icon: <LayoutIcon />, title: "Creative Design", desc: "Scroll-stopping visuals and ad copy." },
       { icon: <ChartIcon />, title: "Lead Generation", desc: "Enquiries delivered straight to you." },
     ],
+    about: "We build Facebook and Instagram campaigns with eye-catching creative and sharp audiences to bring you enquiries, not just likes.",
+    steps: [
+      ["Strategy", "Define the audience and the offer."],
+      ["Create", "Design the visuals and write the ad copy."],
+      ["Test & Scale", "Keep the winners, pause what doesn't work."],
+    ],
+    faqs: [
+      ["Do you make the ad creatives?", "Yes. Images, short videos and copy are included."],
+      ["Can ads send leads to WhatsApp?", "Yes. Lead forms and click-to-WhatsApp ads are both supported."],
+    ],
     className: "rotate-[-7deg]",
   },
   {
@@ -1647,9 +1925,74 @@ const SERVICES: Service[] = [
       { icon: <CheckIcon />, title: "Review Management", desc: "Collect and reply to reviews that build trust." },
       { icon: <ChartIcon />, title: "Posts & Insights", desc: "Regular updates and performance reports." },
     ],
+    about: "Most local customers search on Google Maps first. We optimize your listing so you show up near them, with reviews that build trust.",
+    steps: [
+      ["Set Up", "Claim and fully complete your profile."],
+      ["Optimize", "Categories, photos, services and local keywords."],
+      ["Maintain", "Regular posts and replies to every review."],
+    ],
+    faqs: [
+      ["Why does my profile need optimizing?", "A complete, active profile ranks higher in local map results."],
+      ["Can you help with a suspended profile?", "We can help prepare and submit a reinstatement request."],
+    ],
     className: "rotate-[4deg]",
   },
 ];
+
+/* ---------------- SEO: real text + structured data for crawlers and screen readers ---------------- */
+// The same copy users see in the books (all 3 pages of every book), always present in the HTML,
+// even while the books are closed and their pages aren't mounted.
+const SeoContent = () => {
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@graph": SERVICES.map((s) => ({
+      "@type": "Service",
+      name: s.title,
+      serviceType: s.title,
+      description: `${s.desc} ${s.about}`,
+      provider: { "@type": "Organization", name: "ShivayTech" },
+    })),
+  };
+
+  return (
+    <>
+      <div className="sr-only">
+        {SERVICES.map((s) => (
+          <article key={s.title}>
+            <h4>{s.title} details</h4>
+            <p>
+              {s.desc} {s.about}
+            </p>
+            <ul>
+              {s.features.map((f) => (
+                <li key={f.title}>
+                  <strong>{f.title}</strong>: {f.desc}
+                </li>
+              ))}
+            </ul>
+            <ol>
+              {s.steps.map(([t, d]) => (
+                <li key={t}>
+                  <strong>{t}</strong>: {d}
+                </li>
+              ))}
+            </ol>
+            {s.faqs.map(([q, a]) => (
+              <div key={q}>
+                <h5>{q}</h5>
+                <p>{a}</p>
+              </div>
+            ))}
+          </article>
+        ))}
+      </div>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }}
+      />
+    </>
+  );
+};
 
 // Where each card rests in the pile, as a fraction (0..1) of the free room inside the section.
 // Same loose pile as the original desktop layout, but it now scales with the section size.
@@ -1713,6 +2056,23 @@ export default function DraggableCardDemo() {
   const touch = useMediaQuery("(pointer: coarse)");
   const reduceMotion = useReducedMotion();
 
+  // after first paint (browser idle), switch on the grain textures: the books show up first, texture follows
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const on = () => el.setAttribute("data-fx", "1");
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (w.requestIdleCallback) {
+      const id = w.requestIdleCallback(on, { timeout: 1200 });
+      return () => w.cancelIdleCallback?.(id);
+    }
+    const id = window.setTimeout(on, 300);
+    return () => clearTimeout(id);
+  }, []);
+
   // measure the section width (before first paint, then on every resize)
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -1737,18 +2097,41 @@ export default function DraggableCardDemo() {
   }, [active]);
 
   // grabbed card goes on top of the pile
-  const bringToFront = (i: number) =>
-    setOrder((o) => (o[o.length - 1] === i ? o : [...o.filter((n) => n !== i), i]));
+  const bringToFront = useCallback(
+    (i: number) =>
+      setOrder((o) => (o[o.length - 1] === i ? o : [...o.filter((n) => n !== i), i])),
+    [],
+  );
+
+  // stable callbacks so the memoized cards don't re-render when another book opens
+  const handleOpen = useCallback(
+    (i: number) => {
+      bringToFront(i);
+      setOpenFit(null);
+      setActive(i);
+    },
+    [bringToFront],
+  );
+  const handleClose = useCallback(() => {
+    setActive(null);
+    setOpenFit(null);
+  }, []);
 
   return (
     <MotionConfig reducedMotion="user">
       <DraggableCardContainer
         ref={wrapRef}
         className="relative flex w-full items-center justify-center overflow-clip"
-        style={{ height: layout ? layout.height : 1400 }}
+        style={{
+          height: layout ? layout.height : 1400,
+          // don't render the section at all until it is near the viewport
+          contentVisibility: "auto",
+          containIntrinsicSize: `auto ${layout ? layout.height : 1400}px`,
+        }}
       >
         <SpaceBackdrop />
         <style>{BOOK_CSS}</style>
+        <SeoContent />
 
         {/* section heading + how-to line (sits behind the books so they can be dragged over it) */}
         <header className="pointer-events-none absolute inset-x-0 top-0 z-0 px-6 pt-10 text-center md:pt-14">
@@ -1831,15 +2214,8 @@ export default function DraggableCardDemo() {
                   index={i}
                   unit={layout.unit}
                   open={bookOpen}
-                  onOpen={() => {
-                    bringToFront(i);
-                    setOpenFit(null);
-                    setActive(i);
-                  }}
-                  onClose={() => {
-                    setActive(null);
-                    setOpenFit(null);
-                  }}
+                  onOpen={handleOpen}
+                  onClose={handleClose}
                   onFit={setOpenFit}
                 />
               </DraggableCardBody>
