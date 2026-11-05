@@ -1,53 +1,84 @@
-"use client";
-import { cn } from "@/lib/utils";
-import React, {
-  useRef,
-  useState,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useCallback,
-  memo,
-  startTransition,
-  useSyncExternalStore,
-} from "react";
-import { createPortal } from "react-dom";
+"use client"
+
+import { cn } from "@/lib/utils"
 import {
-  motion,
-  animate,
-  MotionConfig,
-  useMotionValue,
-  useReducedMotion,
-  useSpring,
-  useTransform,
-} from "motion/react";
+	forwardRef,
+	memo,
+	startTransition,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react"
+import type { CSSProperties, ReactNode } from "react"
+import { createPortal } from "react-dom"
+import {
+	animate,
+	motion,
+	MotionConfig,
+	useMotionValue,
+	useReducedMotion,
+	useSpring,
+	useTransform,
+} from "motion/react"
 
 /* =====================================================================
-   PERFORMANCE + RESPONSIVE NOTES
-   TWO RENDER PATHS (picked automatically):
-   - "simple" path  -> phones, tablets, touch screens, small windows and weak devices
-       * books are flat covers (no preserve-3d, no perspective, no tilt springs, no hover scale)
-       * details open in a native-size, scrollable sheet (real 15-16px text, 44px tap targets)
-       * static sky: ONE canvas, no twinkle animation, no grain textures, no SVG noise filters
-   - "rich" path    -> desktop with a fine pointer on decent hardware: the full 3D book experience
-
+   TWO RENDER PATHS (picked automatically)
+   - "simple": phones, tablets, touch screens, small windows, weak devices
+       flat covers (no preserve-3d / perspective / tilt / hover scale),
+       details in a native-size scrollable sheet, one static canvas sky
+   - "rich": desktop with a fine pointer on decent hardware: full 3D books
    SHARED
-   - Open-only parts (hardcover boards, page stacks, fold, left/right page) mount only on hover intent / focus / press / open.
-   - content-visibility:auto skips rendering the section until it nears the viewport.
-   - ServiceCard + CardSlot are memoized with stable props, so grabbing / opening one book re-renders only that book.
-   - Mouse tilt reads layout at most once per animation frame.
-   - Resize relayout is debounced; media queries use useSyncExternalStore (no extra first render).
-   - will-change is only set while a card is being dragged.
-   - Phone layout is a zig-zag grid computed in px, so every book is visible, reachable and never outside the section.
+   - open-only parts mount on hover intent / focus / press / open
+   - content-visibility:auto skips the section until it nears the viewport
+   - ServiceCard + CardSlot are memoized: opening / dragging one book re-renders only that book
+   - tilt reads layout at most once per frame; resize relayout is debounced
+   - will-change only while a card is being dragged
    ===================================================================== */
 
-// Space background that fills only its parent section (the parent must be position: relative).
-// Stars are drawn ONCE onto small canvases (no animation loop). The twinkle is a CSS opacity
-// fade on each canvas with a different duration/delay, so it runs on the GPU compositor.
-// In `lite` mode there is a single canvas and no animation at all.
-type Star = { x: number; y: number; r: number; a: number; color: string };
+type Pt = { clientX: number; clientY: number }
 
-const TWINKLE_LAYERS = 3;
+const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max)
+
+const activate = (fn: () => void) => (e: { key: string; preventDefault(): void }) => {
+	if (e.key !== "Enter" && e.key !== " ") return
+	e.preventDefault()
+	fn()
+}
+
+// a "tap" is a pointer that barely moved, so dragging never opens a book
+function useTap(onTap: () => void, slop: number) {
+	const down = useRef<{ x: number; y: number } | null>(null)
+	return {
+		onPointerDown: (e: Pt) => {
+			down.current = { x: e.clientX, y: e.clientY }
+		},
+		onPointerCancel: () => {
+			down.current = null
+		},
+		onPointerUp: (e: Pt) => {
+			const d = down.current
+			down.current = null
+			if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < slop) onTap()
+		},
+	}
+}
+
+function useImage(src?: string) {
+	const [failed, setFailed] = useState(false)
+	return [!!src && !failed, () => setFailed(true)] as const
+}
+
+/* ---------------- Space backdrop ---------------- */
+// Stars are drawn ONCE onto small canvases (no animation loop). The twinkle is a CSS opacity
+// fade per canvas, so it runs on the compositor. `lite` = one canvas, no animation.
+
+type Star = { x: number; y: number; r: number; a: number; color: string }
+
+const LAYERS = 3
 
 const TWINKLE_CSS = `
   @keyframes sb-twinkle {
@@ -63,494 +94,436 @@ const TWINKLE_CSS = `
   @media (prefers-reduced-motion: reduce) {
     .sb-layer { animation: none; opacity: 0.8; will-change: auto; }
   }
-`;
+`
 
-const SpaceBackdropBase = ({ lite }: { lite: boolean }) => {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
-  const layers = lite ? 1 : TWINKLE_LAYERS;
+const SpaceBackdrop = memo(function SpaceBackdrop({ lite }: { lite: boolean }) {
+	const wrapRef = useRef<HTMLDivElement>(null)
+	const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
+	const layers = lite ? 1 : LAYERS
 
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    const canvases = canvasRefs.current.slice(0, layers).filter(Boolean) as HTMLCanvasElement[];
-    if (!wrap || canvases.length !== layers) return;
+	useEffect(() => {
+		const wrap = wrapRef.current
+		const canvases = canvasRefs.current.slice(0, layers).filter(Boolean) as HTMLCanvasElement[]
+		if (!wrap || canvases.length !== layers) return
 
-    // 1x is plenty for 1-3px stars and uses far less GPU memory than 1.5x
-    const dpr = 1;
-    wrap.classList.toggle("sb-lite", lite);
+		wrap.classList.toggle("sb-lite", lite)
 
-    // star positions are stored as 0..1 so a resize redraws the same sky
-    const stars: Star[] = Array.from({ length: 180 }, () => {
-      const light = Math.random() < 0.18;
-      const hue = light ? 220 : 216 + Math.random() * 22;
-      const sat = light ? 25 : 95;
-      const lum = light ? 85 + Math.random() * 10 : 50 + Math.random() * 25;
-      return {
-        x: Math.random(),
-        y: Math.random(),
-        r: 0.8 + Math.random() * 1.4,
-        a: 0.45 + Math.random() * 0.45,
-        color: `hsl(${hue} ${sat}% ${lum}%)`,
-      };
-    });
+		// positions are stored as 0..1 so a resize redraws the same sky
+		const stars: Star[] = Array.from({ length: 180 }, () => {
+			const light = Math.random() < 0.18
+			const hue = light ? 220 : 216 + Math.random() * 22
+			const sat = light ? 25 : 95
+			const lum = light ? 85 + Math.random() * 10 : 50 + Math.random() * 25
+			return {
+				x: Math.random(),
+				y: Math.random(),
+				r: 0.8 + Math.random() * 1.4,
+				a: 0.45 + Math.random() * 0.45,
+				color: `hsl(${hue} ${sat}% ${lum}%)`,
+			}
+		})
 
-    let raf = 0;
-    let timer = 0;
-    let drawnW = 0;
-    let drawnH = 0;
-    const host = wrap.parentElement ?? wrap;
+		const host = wrap.parentElement ?? wrap
+		let raf = 0
+		let timer = 0
+		let drawnW = 0
+		let drawnH = 0
 
-    const draw = () => {
-      const w = host.clientWidth;
-      const h = host.clientHeight;
-      if (!w || !h) return;
-      drawnW = w;
-      drawnH = h;
+		const draw = () => {
+			const w = host.clientWidth
+			const h = host.clientHeight
+			if (!w || !h) return
+			drawnW = w
+			drawnH = h
 
-      // fewer stars on small screens / small sections
-      const density = lite ? 12000 : w < 768 ? 12000 : 9000;
-      const count = Math.min(stars.length, Math.round((w * h) / density));
+			// fewer stars on small screens / small sections
+			const density = lite || w < 768 ? 12000 : 9000
+			const count = Math.min(stars.length, Math.round((w * h) / density))
 
-      canvases.forEach((canvas, layer) => {
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, w, h);
+			canvases.forEach((canvas, layer) => {
+				const ctx = canvas.getContext("2d")
+				if (!ctx) return
+				// assigning width / height also clears the canvas and resets its state
+				canvas.width = w
+				canvas.height = h
+				canvas.style.width = `${w}px`
+				canvas.style.height = `${h}px`
 
-        // each canvas draws its own share of the stars
-        for (let i = layer; i < count; i += layers) {
-          const s = stars[i];
-          const x = s.x * w;
-          const y = s.y * h;
-          ctx.fillStyle = s.color;
-          // faint halo instead of shadowBlur (much cheaper)
-          ctx.globalAlpha = s.a * 0.18;
-          ctx.beginPath();
-          ctx.arc(x, y, s.r * 3, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.globalAlpha = s.a;
-          ctx.beginPath();
-          ctx.arc(x, y, s.r, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.globalAlpha = 1;
-      });
-    };
+				// each canvas draws its own share of the stars
+				for (let i = layer; i < count; i += layers) {
+					const s = stars[i]
+					const x = s.x * w
+					const y = s.y * h
+					ctx.fillStyle = s.color
+					// faint halo instead of shadowBlur (much cheaper)
+					ctx.globalAlpha = s.a * 0.18
+					ctx.beginPath()
+					ctx.arc(x, y, s.r * 3, 0, Math.PI * 2)
+					ctx.fill()
+					ctx.globalAlpha = s.a
+					ctx.beginPath()
+					ctx.arc(x, y, s.r, 0, Math.PI * 2)
+					ctx.fill()
+				}
+			})
+		}
 
-    // first draw is immediate; later resizes are debounced and ignored if the size didn't change
-    raf = requestAnimationFrame(draw);
-    const ro = new ResizeObserver(() => {
-      if (host.clientWidth === drawnW && host.clientHeight === drawnH) return;
-      clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(draw);
-      }, 150);
-    });
-    ro.observe(host);
+		// first draw is immediate; later resizes are debounced and ignored if the size didn't change
+		raf = requestAnimationFrame(draw)
+		const ro = new ResizeObserver(() => {
+			if (host.clientWidth === drawnW && host.clientHeight === drawnH) return
+			clearTimeout(timer)
+			timer = window.setTimeout(() => {
+				cancelAnimationFrame(raf)
+				raf = requestAnimationFrame(draw)
+			}, 150)
+		})
+		ro.observe(host)
 
-    // pause the CSS twinkle while the section is off-screen (nothing to pause in lite mode)
-    let io: IntersectionObserver | undefined;
-    if (!lite) {
-      io = new IntersectionObserver(([e]) => {
-        wrap.classList.toggle("sb-paused", !e.isIntersecting);
-      });
-      io.observe(wrap);
-    }
+		// pause the twinkle while off-screen (nothing to pause in lite mode)
+		let io: IntersectionObserver | undefined
+		if (!lite) {
+			io = new IntersectionObserver(([e]) => wrap.classList.toggle("sb-paused", !e.isIntersecting))
+			io.observe(wrap)
+		}
 
-    return () => {
-      clearTimeout(timer);
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-      io?.disconnect();
-    };
-  }, [lite, layers]);
+		return () => {
+			clearTimeout(timer)
+			cancelAnimationFrame(raf)
+			ro.disconnect()
+			io?.disconnect()
+		}
+	}, [lite, layers])
 
-  return (
-    <div
-      ref={wrapRef}
-      aria-hidden
-      className="pointer-events-none absolute inset-0"
-      style={{
-        background:
-          "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
-      }}
-    >
-      <style>{TWINKLE_CSS}</style>
+	return (
+		<div
+			ref={wrapRef}
+			aria-hidden
+			className="pointer-events-none absolute inset-0"
+			style={{
+				background: "radial-gradient(ellipse 70% 55% at 50% 42%, #0a1a5c 0%, #050b2a 40%, #02040f 70%, #000000 100%)",
+			}}
+		>
+			<style>{TWINKLE_CSS}</style>
+			{Array.from({ length: layers }, (_, i) => (
+				<canvas
+					key={i}
+					ref={(el) => {
+						canvasRefs.current[i] = el
+					}}
+					className={`sb-layer sb-layer-${i}`}
+					style={{ position: "absolute", inset: 0 }}
+				/>
+			))}
+		</div>
+	)
+})
 
-      {Array.from({ length: layers }, (_, i) => (
-        <canvas
-          key={i}
-          ref={(el) => {
-            canvasRefs.current[i] = el;
-          }}
-          className={`sb-layer sb-layer-${i}`}
-          style={{ position: "absolute", inset: 0 }}
-        />
-      ))}
-    </div>
-  );
-};
+/* ---------------- Hooks ---------------- */
 
-// memoized: never re-renders when the parent does
-const SpaceBackdrop = memo(SpaceBackdropBase);
-
-/* ---------------- Small hooks ---------------- */
-
-// useSyncExternalStore: correct value on the first client render (no false -> true flash / extra render)
+// useSyncExternalStore: correct value on the first client render (no false -> true flash)
 function useMediaQuery(query: string) {
-  const subscribe = useCallback(
-    (cb: () => void) => {
-      const mq = window.matchMedia(query);
-      mq.addEventListener("change", cb);
-      return () => mq.removeEventListener("change", cb);
-    },
-    [query],
-  );
-  return useSyncExternalStore(
-    subscribe,
-    () => window.matchMedia(query).matches,
-    () => false,
-  );
+	const subscribe = useCallback(
+		(cb: () => void) => {
+			const mq = window.matchMedia(query)
+			mq.addEventListener("change", cb)
+			return () => mq.removeEventListener("change", cb)
+		},
+		[query]
+	)
+	return useSyncExternalStore(subscribe, () => window.matchMedia(query).matches, () => false)
 }
 
-// weak hardware (<= 4 cores, <= 2 GB RAM) or the user turned on Data Saver -> use the lightweight path.
-// Tune the thresholds here if you want more or fewer devices on the light path.
-const noopSubscribe = () => () => {};
-function weakSnapshot() {
-  const n = navigator as Navigator & {
-    deviceMemory?: number;
-    connection?: { saveData?: boolean };
-  };
-  return (n.hardwareConcurrency ?? 8) <= 4 || (n.deviceMemory ?? 8) <= 2 || !!n.connection?.saveData;
+// weak hardware (<= 4 cores, <= 2 GB RAM) or Data Saver -> lightweight path. Tune the thresholds here.
+const noopSubscribe = () => () => {}
+const weakSnapshot = () => {
+	const n = navigator as Navigator & { deviceMemory?: number; connection?: { saveData?: boolean } }
+	return (n.hardwareConcurrency ?? 8) <= 4 || (n.deviceMemory ?? 8) <= 2 || !!n.connection?.saveData
 }
-function useWeakDevice() {
-  return useSyncExternalStore(noopSubscribe, weakSnapshot, () => false);
-}
-
-const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+const useWeakDevice = () => useSyncExternalStore(noopSubscribe, weakSnapshot, () => false)
 
 /* ---------------- Draggable card ---------------- */
 
-type Bounds = { left: number; right: number; top: number; bottom: number };
+type Bounds = { left: number; right: number; top: number; bottom: number }
+
+const TILT_SPRING = { stiffness: 100, damping: 20, mass: 0.5 }
+const SNAP_SPRING = { type: "spring" as const, stiffness: 260, damping: 30 }
+const DRAG_TRANSITION = { bounceStiffness: 400, bounceDamping: 40 }
+const HOVER = { scale: 1.02 }
 
 export const DraggableCardBody = ({
-  className,
-  children,
-  style,
-  constraints,
-  flat = false,
-  simple = false,
-  touch = false,
-  unit = 1,
-  onFront,
+	className,
+	children,
+	style,
+	constraints,
+	flat = false,
+	simple = false,
+	touch = false,
+	unit = 1,
+	onFront,
 }: {
-  className?: string;
-  children?: React.ReactNode;
-  style?: React.CSSProperties;
-  /** how far (px) the card may move from its resting spot: keeps it inside the section */
-  constraints?: Bounds;
-  /** no tilt / hover-grow (used while the book is open; it can still be dragged) */
-  flat?: boolean;
-  /** lightweight mode: no 3D transform, no tilt, no hover scale (phones / weak devices) */
-  simple?: boolean;
-  /** touch screens: only drag sideways so the page can still scroll vertically */
-  touch?: boolean;
-  /** card size relative to desktop (keeps the tilt feeling the same on small cards) */
-  unit?: number;
-  /** called when the card is grabbed so the parent can bring it to the front */
-  onFront?: () => void;
+	className?: string
+	children?: ReactNode
+	style?: CSSProperties
+	/** how far (px) the card may move from its resting spot: keeps it inside the section */
+	constraints?: Bounds
+	/** no tilt / hover-grow (used while the book is open; it can still be dragged) */
+	flat?: boolean
+	/** lightweight mode: no 3D transform, no tilt, no hover scale */
+	simple?: boolean
+	/** touch screens: only drag sideways so the page can still scroll vertically */
+	touch?: boolean
+	/** card size relative to desktop (keeps the tilt feeling the same on small cards) */
+	unit?: number
+	/** called when the card is grabbed so the parent can bring it to the front */
+	onFront?: () => void
 }) => {
-  const x = useMotionValue(0);
-  const y = useMotionValue(0);
-  const mouseX = useMotionValue(0);
-  const mouseY = useMotionValue(0);
-  const cardRef = useRef<HTMLDivElement>(null);
-  const rafRef = useRef(0);
-  const lastPt = useRef({ x: 0, y: 0 });
+	const x = useMotionValue(0)
+	const y = useMotionValue(0)
+	const mouseX = useMotionValue(0)
+	const mouseY = useMotionValue(0)
+	const cardRef = useRef<HTMLDivElement>(null)
+	const raf = useRef(0)
+	const pt = useRef({ x: 0, y: 0 })
 
-  const springConfig = {
-    stiffness: 100,
-    damping: 20,
-    mass: 0.5,
-  };
+	const rotateX = useSpring(useTransform(mouseY, [-300, 300], [25, -25]), TILT_SPRING)
+	const rotateY = useSpring(useTransform(mouseX, [-300, 300], [-25, 25]), TILT_SPRING)
 
-  const rotateX = useSpring(
-    useTransform(mouseY, [-300, 300], [25, -25]),
-    springConfig,
-  );
-  const rotateY = useSpring(
-    useTransform(mouseX, [-300, 300], [-25, 25]),
-    springConfig,
-  );
+	useEffect(() => () => cancelAnimationFrame(raf.current), [])
 
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+	// flatten the tilt when the book opens
+	useEffect(() => {
+		if (flat) {
+			mouseX.set(0)
+			mouseY.set(0)
+		}
+	}, [flat, mouseX, mouseY])
 
-  // flatten the tilt when the book opens
-  useEffect(() => {
-    if (flat) {
-      mouseX.set(0);
-      mouseY.set(0);
-    }
-  }, [flat, mouseX, mouseY]);
+	// when the allowed area changes (book opens / closes / window resizes), glide the card back inside it
+	const cl = constraints?.left
+	const cr = constraints?.right
+	const ct = constraints?.top
+	const cb = constraints?.bottom
+	useEffect(() => {
+		if (cl === undefined || cr === undefined || ct === undefined || cb === undefined) return
+		const nx = clamp(x.get(), cl, cr)
+		const ny = clamp(y.get(), ct, cb)
+		if (nx !== x.get()) animate(x, nx, SNAP_SPRING)
+		if (ny !== y.get()) animate(y, ny, SNAP_SPRING)
+	}, [cl, cr, ct, cb, x, y])
 
-  // when the allowed area changes (book opens / closes / window resizes),
-  // glide the card back inside it so it can never get stuck outside
-  const cl = constraints?.left;
-  const cr = constraints?.right;
-  const ct = constraints?.top;
-  const cb = constraints?.bottom;
-  useEffect(() => {
-    if (cl === undefined || cr === undefined || ct === undefined || cb === undefined) return;
-    const spring = { type: "spring" as const, stiffness: 260, damping: 30 };
-    const nx = Math.min(Math.max(x.get(), cl), cr);
-    const ny = Math.min(Math.max(y.get(), ct), cb);
-    if (nx !== x.get()) animate(x, nx, spring);
-    if (ny !== y.get()) animate(y, ny, spring);
-  }, [cl, cr, ct, cb, x, y]);
+	// at most ONE layout read per frame, however fast the mouse fires events
+	const onMove = (e: Pt) => {
+		pt.current.x = e.clientX
+		pt.current.y = e.clientY
+		if (raf.current) return
+		raf.current = requestAnimationFrame(() => {
+			raf.current = 0
+			const rect = cardRef.current?.getBoundingClientRect()
+			if (!rect) return
+			// divide by unit so small cards tilt as much as big ones
+			mouseX.set((pt.current.x - (rect.left + rect.width / 2)) / unit)
+			mouseY.set((pt.current.y - (rect.top + rect.height / 2)) / unit)
+		})
+	}
 
-  // at most ONE layout read per animation frame, however fast the mouse fires events
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (flat || simple) return;
-    lastPt.current.x = e.clientX;
-    lastPt.current.y = e.clientY;
-    if (rafRef.current) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = 0;
-      const rect = cardRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      // divide by unit so small cards tilt as much as big ones
-      mouseX.set((lastPt.current.x - (rect.left + rect.width / 2)) / unit);
-      mouseY.set((lastPt.current.y - (rect.top + rect.height / 2)) / unit);
-    });
-  };
+	const reset = () => {
+		cancelAnimationFrame(raf.current)
+		raf.current = 0
+		mouseX.set(0)
+		mouseY.set(0)
+	}
 
-  const handleMouseLeave = () => {
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = 0;
-    mouseX.set(0);
-    mouseY.set(0);
-  };
+	return (
+		<motion.div
+			ref={cardRef}
+			drag={touch ? "x" : true}
+			dragConstraints={constraints}
+			dragElastic={0.08}
+			dragMomentum
+			dragTransition={DRAG_TRANSITION}
+			onPointerDown={onFront}
+			onDragStart={() => {
+				document.body.style.cursor = "grabbing"
+				document.body.style.userSelect = "none"
+				// only promote the card to its own layer while it is moving
+				if (cardRef.current) cardRef.current.style.willChange = "transform"
+				window.getSelection()?.removeAllRanges()
+			}}
+			onDragEnd={() => {
+				document.body.style.cursor = ""
+				document.body.style.userSelect = ""
+				if (cardRef.current) cardRef.current.style.willChange = ""
+				mouseX.set(0)
+				mouseY.set(0)
+			}}
+			style={simple ? { ...style, x, y } : { ...style, x, y, rotateX, rotateY }}
+			whileHover={flat || touch || simple ? undefined : HOVER}
+			onMouseMove={simple || flat ? undefined : onMove}
+			onMouseLeave={simple ? undefined : reset}
+			className={cn("relative", !simple && "transform-3d", className)}
+		>
+			{children}
+		</motion.div>
+	)
+}
 
-  return (
-    <motion.div
-      ref={cardRef}
-      drag={touch ? "x" : true}
-      dragConstraints={constraints}
-      dragElastic={0.08}
-      dragMomentum
-      dragTransition={{ bounceStiffness: 400, bounceDamping: 40 }}
-      onPointerDown={onFront}
-      onDragStart={() => {
-        document.body.style.cursor = "grabbing";
-        document.body.style.userSelect = "none";
-        // only promote the card to its own layer while it is actually moving
-        if (cardRef.current) cardRef.current.style.willChange = "transform";
-        window.getSelection()?.removeAllRanges();
-      }}
-      onDragEnd={() => {
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        if (cardRef.current) cardRef.current.style.willChange = "";
-        mouseX.set(0);
-        mouseY.set(0);
-      }}
-      style={simple ? { ...style, x, y } : { ...style, x, y, rotateX, rotateY }}
-      whileHover={flat || touch || simple ? undefined : { scale: 1.02 }}
-      onMouseMove={simple ? undefined : handleMouseMove}
-      onMouseLeave={simple ? undefined : handleMouseLeave}
-      className={cn("relative", !simple && "transform-3d", className)}
-    >
-      {children}
-    </motion.div>
-  );
-};
+export const DraggableCardContainer = forwardRef<
+	HTMLDivElement,
+	{ className?: string; style?: CSSProperties; children?: ReactNode; flat?: boolean }
+>(({ className, style, children, flat = false }, ref) => (
+	<div ref={ref} style={style} className={cn(!flat && "[perspective:3000px]", className)}>
+		{children}
+	</div>
+))
+DraggableCardContainer.displayName = "DraggableCardContainer"
 
-export const DraggableCardContainer = React.forwardRef<
-  HTMLDivElement,
-  {
-    className?: string;
-    style?: React.CSSProperties;
-    children?: React.ReactNode;
-    /** lightweight mode: no perspective context */
-    flat?: boolean;
-  }
->(({ className, style, children, flat = false }, ref) => {
-  return (
-    <div
-      ref={ref}
-      style={style}
-      className={cn(!flat && "[perspective:3000px]", className)}
-    >
-      {children}
-    </div>
-  );
-});
-DraggableCardContainer.displayName = "DraggableCardContainer";
-
-/* ---------------- Icons (inline SVG, no extra dependency) ---------------- */
+/* ---------------- Icons ---------------- */
 
 const iconProps = {
-  width: 24,
-  height: 24,
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
+	width: 24,
+	height: 24,
+	viewBox: "0 0 24 24",
+	fill: "none",
+	stroke: "currentColor",
+	strokeWidth: 1.8,
+	strokeLinecap: "round" as const,
+	strokeLinejoin: "round" as const,
+}
 
-const CodeIcon = () => (
-  <svg {...iconProps}>
-    <polyline points="16 18 22 12 16 6" />
-    <polyline points="8 6 2 12 8 18" />
-  </svg>
-);
-const LayoutIcon = () => (
-  <svg {...iconProps}>
-    <rect x="3" y="3" width="18" height="18" rx="2" />
-    <line x1="3" y1="9" x2="21" y2="9" />
-    <line x1="9" y1="21" x2="9" y2="9" />
-  </svg>
-);
-const WrenchIcon = () => (
-  <svg {...iconProps}>
-    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-  </svg>
-);
-const SearchIcon = () => (
-  <svg {...iconProps}>
-    <circle cx="11" cy="11" r="8" />
-    <line x1="21" y1="21" x2="16.65" y2="16.65" />
-  </svg>
-);
-const TargetIcon = () => (
-  <svg {...iconProps}>
-    <circle cx="12" cy="12" r="10" />
-    <circle cx="12" cy="12" r="6" />
-    <circle cx="12" cy="12" r="2" />
-  </svg>
-);
-const MegaphoneIcon = () => (
-  <svg {...iconProps}>
-    <path d="m3 11 18-5v12L3 14v-3z" />
-    <path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" />
-  </svg>
-);
-const PinIcon = () => (
-  <svg {...iconProps}>
-    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-    <circle cx="12" cy="10" r="3" />
-  </svg>
-);
-const DevicesIcon = () => (
-  <svg {...iconProps}>
-    <rect x="2" y="4" width="14" height="11" rx="2" />
-    <rect x="15" y="9" width="7" height="12" rx="1.5" />
-    <line x1="6" y1="19" x2="12" y2="19" />
-  </svg>
-);
-const BoltIcon = () => (
-  <svg {...iconProps}>
-    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-  </svg>
-);
-const ShieldIcon = () => (
-  <svg {...iconProps}>
-    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-    <polyline points="9 12 11 14 15 10" />
-  </svg>
-);
-const ChartIcon = () => (
-  <svg {...iconProps}>
-    <line x1="18" y1="20" x2="18" y2="10" />
-    <line x1="12" y1="20" x2="12" y2="4" />
-    <line x1="6" y1="20" x2="6" y2="14" />
-  </svg>
-);
-const CheckIcon = () => (
-  <svg {...iconProps}>
-    <circle cx="12" cy="12" r="10" />
-    <polyline points="8 12 11 15 16 9" />
-  </svg>
-);
-const HeadsetIcon = () => (
-  <svg {...iconProps}>
-    <path d="M3 14v-2a9 9 0 0 1 18 0v2" />
-    <path d="M21 19a2 2 0 0 1-2 2h-1v-6h3z" />
-    <path d="M3 19a2 2 0 0 0 2 2h1v-6H3z" />
-  </svg>
-);
+const icon = (children: ReactNode) => () => <svg {...iconProps}>{children}</svg>
+
+const CodeIcon = icon(
+	<>
+		<polyline points="16 18 22 12 16 6" />
+		<polyline points="8 6 2 12 8 18" />
+	</>
+)
+const LayoutIcon = icon(
+	<>
+		<rect x="3" y="3" width="18" height="18" rx="2" />
+		<line x1="3" y1="9" x2="21" y2="9" />
+		<line x1="9" y1="21" x2="9" y2="9" />
+	</>
+)
+const WrenchIcon = icon(
+	<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+)
+const SearchIcon = icon(
+	<>
+		<circle cx="11" cy="11" r="8" />
+		<line x1="21" y1="21" x2="16.65" y2="16.65" />
+	</>
+)
+const TargetIcon = icon(
+	<>
+		<circle cx="12" cy="12" r="10" />
+		<circle cx="12" cy="12" r="6" />
+		<circle cx="12" cy="12" r="2" />
+	</>
+)
+const MegaphoneIcon = icon(
+	<>
+		<path d="m3 11 18-5v12L3 14v-3z" />
+		<path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" />
+	</>
+)
+const PinIcon = icon(
+	<>
+		<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+		<circle cx="12" cy="10" r="3" />
+	</>
+)
+const DevicesIcon = icon(
+	<>
+		<rect x="2" y="4" width="14" height="11" rx="2" />
+		<rect x="15" y="9" width="7" height="12" rx="1.5" />
+		<line x1="6" y1="19" x2="12" y2="19" />
+	</>
+)
+const BoltIcon = icon(<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />)
+const ShieldIcon = icon(
+	<>
+		<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+		<polyline points="9 12 11 14 15 10" />
+	</>
+)
+const ChartIcon = icon(
+	<>
+		<line x1="18" y1="20" x2="18" y2="10" />
+		<line x1="12" y1="20" x2="12" y2="4" />
+		<line x1="6" y1="20" x2="6" y2="14" />
+	</>
+)
+const CheckIcon = icon(
+	<>
+		<circle cx="12" cy="12" r="10" />
+		<polyline points="8 12 11 15 16 9" />
+	</>
+)
+const HeadsetIcon = icon(
+	<>
+		<path d="M3 14v-2a9 9 0 0 1 18 0v2" />
+		<path d="M21 19a2 2 0 0 1-2 2h-1v-6h3z" />
+		<path d="M3 19a2 2 0 0 0 2 2h1v-6H3z" />
+	</>
+)
 
 /* ---------------- Types & constants ---------------- */
 
-type Feature = { icon: React.ReactNode; title: string; desc: string };
+type Feature = { icon: ReactNode; title: string; desc: string }
 
 type Service = {
-  title: string;
-  desc: string;
-  tagline: string; // bottom line on the cover
-  script: string; // handwritten line on the left page
-  icon: React.ReactNode;
-  accent: string; // bright rgb triplet: glow / highlights
-  base: string; // deep rgb triplet: leather color of the book
-  image?: string; // e.g. "/services/web-development.jpg"
-  features: Feature[]; // page 1
-  about: string; // page 2 intro paragraph
-  steps: [string, string][]; // page 2: [title, description] x3
-  faqs: [string, string][]; // page 3: [question, answer] x2
-  className: string; // tilt of the card in the pile (kept as literal classes so Tailwind sees them)
-};
+	title: string
+	desc: string
+	tagline: string // bottom line on the cover
+	script: string // handwritten line on the left page
+	icon: ReactNode
+	accent: string // bright rgb triplet: glow / highlights
+	base: string // deep rgb triplet: leather color of the book
+	image?: string // e.g. "/services/web-development.jpg"
+	features: Feature[] // page 1
+	about: string // page 2 intro paragraph
+	steps: [string, string][] // page 2: [title, description] x3
+	faqs: [string, string][] // page 3: [question, answer] x2
+	className: string // tilt of the card in the pile (literal classes so Tailwind sees them)
+}
 
-const PAGE_W = 420;
-const PAGE_H = 560;
-const THICK = 56; // book thickness (3D)
-const CARD_SCALE = 0.72; // size of the closed book inside the card
-const OPEN_SCALE_MAX = 0.95; // max size of the open book (shrinks automatically on small sections)
-const GOLD = "232,196,118"; // gold foil
-const GOLD_TEXT = "#f3dfa8";
-const SCRIPT_FONT = "'Segoe Script','Brush Script MT','Snell Roundhand',cursive";
-const EASE = [0.45, 0.05, 0.2, 1] as const;
+const PAGE_W = 420
+const PAGE_H = 560
+const THICK = 56 // book thickness (3D)
+const CARD_SCALE = 0.72 // size of the closed book inside the card
+const OPEN_SCALE_MAX = 0.95 // max size of the open book (shrinks automatically on small sections)
+const GOLD = "232,196,118"
+const GOLD_TEXT = "#f3dfa8"
+const SCRIPT_FONT = "'Segoe Script','Brush Script MT','Snell Roundhand',cursive"
+const EASE = [0.45, 0.05, 0.2, 1] as const
+const COVER_EASE = [0.55, 0.02, 0.2, 1] as const
 
 // desktop card size; on smaller screens everything scales down from this
-const BASE_CARD_W = 320;
-const BASE_CARD_H = 427;
-const MIN_UNIT = 0.55;
+const BASE_CARD_W = 320
+const BASE_CARD_H = 427
+const MIN_UNIT = 0.55
 
-const hidden = {
-  backfaceVisibility: "hidden" as const,
-  WebkitBackfaceVisibility: "hidden" as const,
-};
+const hidden = { backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden" } as const
 
-// Tiny inline-SVG noise tiles (no image files): used for the matte cover and the paper edges.
-// colour = [r,g,b] 0..1, alpha = a * noise + b
-const makeNoise = (
-  freq: number,
-  [r, g, b]: [number, number, number],
-  a: number,
-  b2: number,
-  size = 240,
-) => {
-  const svg =
-    `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}'>` +
-    `<filter id='n' x='0' y='0' width='100%' height='100%'>` +
-    `<feTurbulence type='fractalNoise' baseFrequency='${freq}' numOctaves='3' stitchTiles='stitch'/>` +
-    `<feColorMatrix values='0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  0 0 0 ${a} ${b2}'/>` +
-    `</filter><rect width='${size}' height='${size}' filter='url(#n)'/></svg>`;
-  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-};
-const LEATHER_DARK = makeNoise(0.7, [0, 0.02, 0.03], 1.6, -0.6);
-const LEATHER_LIGHT = makeNoise(0.9, [1, 1, 0.95], 1.4, -0.82, 180);
-const EDGE_NOISE = makeNoise(1.1, [0.35, 0.27, 0.14], 1.2, -0.3);
+// Tiny inline-SVG noise tiles (no image files). colour = [r,g,b] 0..1, alpha = a * noise + b
+const makeNoise = (freq: number, [r, g, b]: [number, number, number], alpha: number, offset: number, size = 240) => {
+	const svg =
+		`<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}'>` +
+		`<filter id='n' x='0' y='0' width='100%' height='100%'>` +
+		`<feTurbulence type='fractalNoise' baseFrequency='${freq}' numOctaves='3' stitchTiles='stitch'/>` +
+		`<feColorMatrix values='0 0 0 0 ${r}  0 0 0 0 ${g}  0 0 0 0 ${b}  0 0 0 ${alpha} ${offset}'/>` +
+		`</filter><rect width='${size}' height='${size}' filter='url(#n)'/></svg>`
+	return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`
+}
+const LEATHER_DARK = makeNoise(0.7, [0, 0.02, 0.03], 1.6, -0.6)
+const LEATHER_LIGHT = makeNoise(0.9, [1, 1, 0.95], 1.4, -0.82, 180)
+const EDGE_NOISE = makeNoise(1.1, [0.35, 0.27, 0.14], 1.2, -0.3)
+const PAPER_NOISE = makeNoise(0.9, [0.36, 0.26, 0.12], 0.9, -0.28)
 
-// Layered page edges + page stacks are built from ::before / ::after (no static images).
-// Grain textures only switch on once the section has set data-fx (after first paint / idle),
-// and never on the lightweight path, so the books appear immediately.
+// Page edges + page stacks are built from ::before / ::after (no static images).
+// Grain only switches on once the section has set data-fx (after first paint / idle), never on the simple path.
 const BOOK_CSS = `
   .sb-edge {
     background-color: #e6d9b6;
@@ -586,1235 +559,1034 @@ const BOOK_CSS = `
   .sb-stack-r::after  { transform: translate(3px, 3px); background: #e6d9b6; box-shadow: 0 1px 0 rgba(90,65,25,0.4); }
   .sb-stack-l::before { transform: translate(-6px, 6px); background: #d2c39a; box-shadow: 0 2px 5px rgba(30,18,4,0.5); }
   .sb-stack-l::after  { transform: translate(-3px, 3px); background: #e6d9b6; box-shadow: 0 1px 0 rgba(90,65,25,0.4); }
-`;
+`
+
+const COVER_CORNERS = [
+	"top-[12px] left-[36px] border-t-2 border-l-2",
+	"top-[12px] right-[12px] border-t-2 border-r-2",
+	"bottom-[12px] left-[36px] border-b-2 border-l-2",
+	"bottom-[12px] right-[12px] border-b-2 border-r-2",
+]
+const PAGE_CORNERS = [
+	"top-[10px] left-[10px] border-t-2 border-l-2",
+	"top-[10px] right-[10px] border-t-2 border-r-2",
+	"bottom-[10px] left-[10px] border-b-2 border-l-2",
+	"bottom-[10px] right-[10px] border-b-2 border-r-2",
+]
+
+const Corners = ({ spots, size }: { spots: string[]; size: number }) => (
+	<>
+		{spots.map((c) => (
+			<span
+				key={c}
+				aria-hidden
+				className={`pointer-events-none absolute ${c}`}
+				style={{ width: size, height: size, borderColor: `rgba(${GOLD},0.95)` }}
+			/>
+		))}
+	</>
+)
 
 /* ---------------- Book cover (flat face) ---------------- */
-// `mini` = the lightweight phone / low-end version: bigger title + number (it gets scaled down a lot),
-// no tagline, no grain layer.
+// `mini` = phone / low-end version: bigger title + number (it gets scaled down a lot), no tagline, no grain.
 
 const BookCover = ({
-  service,
-  index,
-  hint = false,
-  mini = false,
+	service,
+	index,
+	hint = false,
+	mini = false,
 }: {
-  service: Service;
-  index: number;
-  hint?: boolean;
-  mini?: boolean;
+	service: Service
+	index: number
+	hint?: boolean
+	mini?: boolean
 }) => {
-  const { title, tagline, icon, accent, base, image } = service;
-  const [imgFailed, setImgFailed] = useState(false);
-  const showImage = !!image && !imgFailed;
+	const { title, tagline, icon, accent, base, image } = service
+	const [showImage, onError] = useImage(image)
 
-  return (
-    <div
-      className="relative overflow-hidden rounded-r-md rounded-l-sm"
-      style={{
-        width: PAGE_W,
-        height: PAGE_H,
-        // slightly less accent tint + slightly deeper end colour
-        background: `linear-gradient(150deg, rgba(${accent},0.3), rgb(${base}) 40%, #01030b 120%)`,
-        boxShadow: `inset 0 0 0 1px rgba(${GOLD},0.3), inset 0 0 50px rgba(0,0,0,0.5), inset 2px 2px 0 rgba(255,255,255,0.07), inset -3px -3px 8px rgba(0,0,0,0.5)`,
-      }}
-    >
-      {/* picture (fills the whole cover) */}
-      {showImage ? (
-        <img
-          src={image}
-          alt={title}
-          width={PAGE_W}
-          height={PAGE_H}
-          draggable={false}
-          loading="lazy"
-          decoding="async"
-          onError={() => setImgFailed(true)}
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
-        />
-      ) : (
-        <div
-          className="absolute inset-0 flex items-center justify-center"
-          style={{
-            background: `radial-gradient(circle at 50% 52%, rgba(${accent},0.45), transparent 62%)`,
-          }}
-        >
-          <div
-            className="scale-[7] opacity-25"
-            style={{ color: `rgb(${GOLD})` }}
-          >
-            {icon}
-          </div>
-        </div>
-      )}
+	return (
+		<div
+			className="relative overflow-hidden rounded-r-md rounded-l-sm"
+			style={{
+				width: PAGE_W,
+				height: PAGE_H,
+				background: `linear-gradient(150deg, rgba(${accent},0.3), rgb(${base}) 40%, #01030b 120%)`,
+				boxShadow: `inset 0 0 0 1px rgba(${GOLD},0.3), inset 0 0 50px rgba(0,0,0,0.5), inset 2px 2px 0 rgba(255,255,255,0.07), inset -3px -3px 8px rgba(0,0,0,0.5)`,
+			}}
+		>
+			{showImage ? (
+				<img
+					src={image}
+					alt={title}
+					width={PAGE_W}
+					height={PAGE_H}
+					draggable={false}
+					loading="lazy"
+					decoding="async"
+					onError={onError}
+					className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+				/>
+			) : (
+				<div
+					className="absolute inset-0 flex items-center justify-center"
+					style={{ background: `radial-gradient(circle at 50% 52%, rgba(${accent},0.45), transparent 62%)` }}
+				>
+					<div className="scale-[7] opacity-25" style={{ color: `rgb(${GOLD})` }}>
+						{icon}
+					</div>
+				</div>
+			)}
 
-      {/* color grade: leather color at top/bottom so text stays readable, picture shows in the middle (middle a touch darker) */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background: mini
-            ? `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.86) 30%, rgba(${base},0.35) 62%, rgba(${base},0.9) 100%)`
-            : `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
-        }}
-      />
-      {/* accent tint (plain translucent layer: blend modes are slow on low-end GPUs) */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-30"
-        style={{
-          background: `linear-gradient(135deg, rgba(${accent},0.6), transparent 60%)`,
-        }}
-      />
+			{/* color grade: leather color at top/bottom so text stays readable, picture shows in the middle */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{
+					background: mini
+						? `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.86) 30%, rgba(${base},0.35) 62%, rgba(${base},0.9) 100%)`
+						: `linear-gradient(to bottom, rgba(${base},0.97) 0%, rgba(${base},0.8) 20%, rgba(${base},0.18) 44%, rgba(${base},0.15) 62%, rgba(${base},0.87) 88%, rgba(${base},0.98) 100%)`,
+				}}
+			/>
+			{/* accent tint (plain translucent layer: blend modes are slow on low-end GPUs) */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0 opacity-30"
+				style={{ background: `linear-gradient(135deg, rgba(${accent},0.6), transparent 60%)` }}
+			/>
 
-      {/* matte cloth / leather grain (switched on after first paint, see BOOK_CSS) - skipped in mini */}
-      {!mini && (
-        <div
-          aria-hidden
-          className="sb-grain pointer-events-none absolute inset-0 opacity-60"
-        />
-      )}
-      {/* edge wear: the board is slightly darker where hands hold it */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(ellipse at 50% 45%, transparent 52%, rgba(0,0,0,0.46) 100%)",
-        }}
-      />
+			{!mini && <div aria-hidden className="sb-grain pointer-events-none absolute inset-0 opacity-60" />}
+			{/* edge wear */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{ background: "radial-gradient(ellipse at 50% 45%, transparent 52%, rgba(0,0,0,0.46) 100%)" }}
+			/>
 
-      {/* hinge groove */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 bottom-0 left-0 w-[26px]"
-        style={{
-          background:
-            "linear-gradient(90deg, rgba(0,0,0,0.7), rgba(0,0,0,0.25) 55%, rgba(0,0,0,0.05) 80%, rgba(255,255,255,0.09) 92%, rgba(0,0,0,0.3))",
-          borderRight: `1px solid rgba(${GOLD},0.35)`,
-        }}
-      />
+			{/* hinge groove */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-0 bottom-0 left-0 w-[26px]"
+				style={{
+					background:
+						"linear-gradient(90deg, rgba(0,0,0,0.7), rgba(0,0,0,0.25) 55%, rgba(0,0,0,0.05) 80%, rgba(255,255,255,0.09) 92%, rgba(0,0,0,0.3))",
+					borderRight: `1px solid rgba(${GOLD},0.35)`,
+				}}
+			/>
 
-      {/* gold frame */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-[16px] right-[16px] bottom-[16px] left-[40px] border"
-        style={{ borderColor: `rgba(${GOLD},0.55)` }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-[21px] right-[21px] bottom-[21px] left-[45px] border"
-        style={{ borderColor: `rgba(${GOLD},0.2)` }}
-      />
-      {[
-        "top-[12px] left-[36px] border-t-2 border-l-2",
-        "top-[12px] right-[12px] border-t-2 border-r-2",
-        "bottom-[12px] left-[36px] border-b-2 border-l-2",
-        "bottom-[12px] right-[12px] border-b-2 border-r-2",
-      ].map((c) => (
-        <span
-          key={c}
-          aria-hidden
-          className={`pointer-events-none absolute h-[18px] w-[18px] ${c}`}
-          style={{ borderColor: `rgba(${GOLD},0.95)` }}
-        />
-      ))}
+			{/* gold frame */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-[16px] right-[16px] bottom-[16px] left-[40px] border"
+				style={{ borderColor: `rgba(${GOLD},0.55)` }}
+			/>
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-[21px] right-[21px] bottom-[21px] left-[45px] border"
+				style={{ borderColor: `rgba(${GOLD},0.2)` }}
+			/>
+			<Corners spots={COVER_CORNERS} size={18} />
 
-      {/* text */}
-      <div className="absolute top-[34px] right-[34px] bottom-[30px] left-[62px] flex flex-col items-center">
-        <span
-          className={cn("font-serif tracking-[0.35em]", mini ? "text-[28px]" : "text-[18px]")}
-          style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.8)" }}
-        >
-          {String(index + 1).padStart(2, "0")}
-        </span>
+			<div className="absolute top-[34px] right-[34px] bottom-[30px] left-[62px] flex flex-col items-center">
+				<span
+					className={cn("font-serif tracking-[0.35em]", mini ? "text-[28px]" : "text-[18px]")}
+					style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.8)" }}
+				>
+					{String(index + 1).padStart(2, "0")}
+				</span>
 
-        <div className="mt-2 flex w-full items-center gap-2">
-          <span className="h-px flex-1" style={{ background: `linear-gradient(90deg, transparent, rgba(${GOLD},0.85))` }} />
-          <span className="h-1.5 w-1.5 rotate-45" style={{ background: `rgb(${GOLD})` }} />
-          <span className="h-px flex-1" style={{ background: `linear-gradient(270deg, transparent, rgba(${GOLD},0.85))` }} />
-        </div>
+				<div className="mt-2 flex w-full items-center gap-2">
+					<span className="h-px flex-1" style={{ background: `linear-gradient(90deg, transparent, rgba(${GOLD},0.85))` }} />
+					<span className="h-1.5 w-1.5 rotate-45" style={{ background: `rgb(${GOLD})` }} />
+					<span className="h-px flex-1" style={{ background: `linear-gradient(270deg, transparent, rgba(${GOLD},0.85))` }} />
+				</div>
 
-        <h3
-          className={cn(
-            "text-center font-serif leading-[1.08] font-semibold",
-            mini ? "mt-6 text-[56px]" : "mt-4 text-[38px]",
-          )}
-          style={{
-            color: GOLD_TEXT,
-            textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 24px rgba(${accent},0.4)`,
-          }}
-        >
-          {title}
-        </h3>
+				<h3
+					className={cn("text-center font-serif leading-[1.08] font-semibold", mini ? "mt-6 text-[56px]" : "mt-4 text-[38px]")}
+					style={{ color: GOLD_TEXT, textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 24px rgba(${accent},0.4)` }}
+				>
+					{title}
+				</h3>
 
-        {!mini && (
-          <div className="mt-auto flex flex-col items-center">
-            <span
-              className="text-center text-[11px] tracking-[0.35em] uppercase"
-              style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.9)" }}
-            >
-              {tagline}
-            </span>
-            {hint && (
-              <span className="mt-2 text-[10px] tracking-[0.3em] text-white/60 uppercase">
-                Click or tap to open
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+				{!mini && (
+					<div className="mt-auto flex flex-col items-center">
+						<span
+							className="text-center text-[11px] tracking-[0.35em] uppercase"
+							style={{ color: `rgb(${GOLD})`, textShadow: "0 2px 8px rgba(0,0,0,0.9)" }}
+						>
+							{tagline}
+						</span>
+						{hint && <span className="mt-2 text-[10px] tracking-[0.3em] text-white/60 uppercase">Click or tap to open</span>}
+					</div>
+				)}
+			</div>
 
-      {/* light sheen */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "linear-gradient(115deg, transparent 20%, rgba(255,255,255,0.035) 45%, transparent 70%)",
-        }}
-      />
-    </div>
-  );
-};
+			{/* light sheen */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{ background: "linear-gradient(115deg, transparent 20%, rgba(255,255,255,0.035) 45%, transparent 70%)" }}
+			/>
+		</div>
+	)
+}
 
 /* ---------------- Left page of the open book (back of the cover) ---------------- */
 
 const LeftPage = ({ service, index }: { service: Service; index: number }) => {
-  const { title, desc, script, icon, accent, base, image } = service;
-  const [imgFailed, setImgFailed] = useState(false);
-  const showImage = !!image && !imgFailed;
+	const { title, desc, script, icon, accent, base, image } = service
+	const [showImage, onError] = useImage(image)
 
-  return (
-    <div className="relative h-full w-full overflow-hidden rounded-l-md bg-[#040a24]">
-      {showImage ? (
-        <img
-          src={image}
-          alt={title}
-          width={PAGE_W}
-          height={PAGE_H}
-          draggable={false}
-          decoding="async"
-          onError={() => setImgFailed(true)}
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
-        />
-      ) : (
-        <div
-          className="absolute inset-0 flex items-center justify-center"
-          style={{
-            background: `radial-gradient(circle at 60% 55%, rgba(${accent},0.45), transparent 60%), linear-gradient(160deg, rgb(${base}), #02040f)`,
-          }}
-        >
-          <div className="scale-[6] opacity-30" style={{ color: `rgb(${GOLD})` }}>
-            {icon}
-          </div>
-        </div>
-      )}
+	return (
+		<div className="relative h-full w-full overflow-hidden rounded-l-md bg-[#040a24]">
+			{showImage ? (
+				<img
+					src={image}
+					alt={title}
+					width={PAGE_W}
+					height={PAGE_H}
+					draggable={false}
+					decoding="async"
+					onError={onError}
+					className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+				/>
+			) : (
+				<div
+					className="absolute inset-0 flex items-center justify-center"
+					style={{
+						background: `radial-gradient(circle at 60% 55%, rgba(${accent},0.45), transparent 60%), linear-gradient(160deg, rgb(${base}), #02040f)`,
+					}}
+				>
+					<div className="scale-[6] opacity-30" style={{ color: `rgb(${GOLD})` }}>
+						{icon}
+					</div>
+				</div>
+			)}
 
-      {/* overlays (a touch darker to match the cover) */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background: `linear-gradient(to bottom, rgba(${base},0.96) 0%, rgba(${base},0.4) 38%, rgba(${base},0.45) 60%, rgba(${base},0.96) 100%)`,
-        }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-40"
-        style={{ background: `linear-gradient(135deg, rgba(${accent},0.5), transparent 65%)` }}
-      />
-      {/* soft inner shadow around the page boundary */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{ boxShadow: "inset 0 0 40px rgba(0,0,0,0.38), inset 0 0 4px rgba(0,0,0,0.5)" }}
-      />
-      {/* gutter shadow */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 right-0 bottom-0 w-20"
-        style={{
-          background:
-            "linear-gradient(270deg, rgba(0,0,0,0.72), rgba(0,0,0,0.26) 40%, transparent)",
-        }}
-      />
-      {/* frame */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-[14px] border"
-        style={{ borderColor: `rgba(${GOLD},0.45)` }}
-      />
-      {[
-        "top-[10px] left-[10px] border-t-2 border-l-2",
-        "top-[10px] right-[10px] border-t-2 border-r-2",
-        "bottom-[10px] left-[10px] border-b-2 border-l-2",
-        "bottom-[10px] right-[10px] border-b-2 border-r-2",
-      ].map((c) => (
-        <span
-          key={c}
-          aria-hidden
-          className={`pointer-events-none absolute h-[16px] w-[16px] ${c}`}
-          style={{ borderColor: `rgba(${GOLD},0.95)` }}
-        />
-      ))}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{
+					background: `linear-gradient(to bottom, rgba(${base},0.96) 0%, rgba(${base},0.4) 38%, rgba(${base},0.45) 60%, rgba(${base},0.96) 100%)`,
+				}}
+			/>
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0 opacity-40"
+				style={{ background: `linear-gradient(135deg, rgba(${accent},0.5), transparent 65%)` }}
+			/>
+			{/* inner shadow around the page boundary */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{ boxShadow: "inset 0 0 40px rgba(0,0,0,0.38), inset 0 0 4px rgba(0,0,0,0.5)" }}
+			/>
+			{/* gutter shadow */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-0 right-0 bottom-0 w-20"
+				style={{ background: "linear-gradient(270deg, rgba(0,0,0,0.72), rgba(0,0,0,0.26) 40%, transparent)" }}
+			/>
+			<div aria-hidden className="pointer-events-none absolute inset-[14px] border" style={{ borderColor: `rgba(${GOLD},0.45)` }} />
+			<Corners spots={PAGE_CORNERS} size={16} />
 
-      <div className="absolute inset-0 flex flex-col p-10">
-        <span
-          className="font-serif text-[14px] tracking-[0.35em]"
-          style={{ color: `rgb(${GOLD})` }}
-        >
-          {String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
-        </span>
-        <h3
-          className="mt-3 font-serif text-[44px] leading-[1.05] font-semibold"
-          style={{ color: GOLD_TEXT, textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 30px rgba(${accent},0.6)` }}
-        >
-          {title}
-        </h3>
-        <p className="mt-3 max-w-[300px] text-[15px] leading-relaxed text-white/85">
-          {desc}
-        </p>
-        <div className="mt-auto flex items-end gap-3">
-          <span
-            className="text-[30px] leading-none text-white italic"
-            style={{ fontFamily: SCRIPT_FONT, textShadow: `0 0 18px rgba(${accent},0.9)` }}
-          >
-            {script}
-          </span>
-          <svg width="46" height="18" viewBox="0 0 46 18" fill="none" className="mb-1" style={{ color: `rgb(${GOLD})` }}>
-            <path d="M1 12c10-10 24-10 38 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M33 6l7 6-9 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </div>
-      </div>
-    </div>
-  );
-};
+			<div className="absolute inset-0 flex flex-col p-10">
+				<span className="font-serif text-[14px] tracking-[0.35em]" style={{ color: `rgb(${GOLD})` }}>
+					{String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
+				</span>
+				<h3
+					className="mt-3 font-serif text-[44px] leading-[1.05] font-semibold"
+					style={{ color: GOLD_TEXT, textShadow: `0 2px 10px rgba(0,0,0,0.8), 0 0 30px rgba(${accent},0.6)` }}
+				>
+					{title}
+				</h3>
+				<p className="mt-3 max-w-[300px] text-[15px] leading-relaxed text-white/85">{desc}</p>
+				<div className="mt-auto flex items-end gap-3">
+					<span
+						className="text-[30px] leading-none text-white italic"
+						style={{ fontFamily: SCRIPT_FONT, textShadow: `0 0 18px rgba(${accent},0.9)` }}
+					>
+						{script}
+					</span>
+					<svg width="46" height="18" viewBox="0 0 46 18" fill="none" className="mb-1" style={{ color: `rgb(${GOLD})` }}>
+						<path d="M1 12c10-10 24-10 38 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+						<path d="M33 6l7 6-9 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+					</svg>
+				</div>
+			</div>
+		</div>
+	)
+}
 
-/* ---------------- Right page (a real paper page, now with 3 scrollable pages) ---------------- */
+/* ---------------- Right page (paper, 3 scrollable pages) ---------------- */
 
-const BOOK_FONT =
-  "'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,Georgia,serif";
-const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
-const INK = "rgba(38,25,10,0.92)";
-const INK_SOFT = "rgba(86,62,28,0.85)";
-const PAGE_TITLES = ["What\u2019s included", "How it works", "Good to know"];
-const PAGE_COUNT = PAGE_TITLES.length;
+const BOOK_FONT = "'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,Georgia,serif"
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"]
+const INK = "rgba(38,25,10,0.92)"
+const INK_SOFT = "rgba(86,62,28,0.85)"
+const PAGE_TITLES = ["What\u2019s included", "How it works", "Good to know"]
+const PAGE_COUNT = PAGE_TITLES.length
 
 // "r,g,b" -> darker "r,g,b"
 const shade = (rgb: string, k: number) =>
-  rgb
-    .split(",")
-    .map((n) => Math.round(Number(n) * k))
-    .join(",");
-
-// paper fibre noise: a tiny inline SVG the browser tiles (no image file needed)
-const PAPER_NOISE = (() => {
-  const svg =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'>" +
-    "<filter id='n' x='0' y='0' width='100%' height='100%'>" +
-    "<feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/>" +
-    "<feColorMatrix values='0 0 0 0 0.36  0 0 0 0 0.26  0 0 0 0 0.12  0 0 0 0.9 -0.28'/>" +
-    "</filter><rect width='240' height='240' filter='url(#n)'/></svg>";
-  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-})();
+	rgb
+		.split(",")
+		.map((n) => Math.round(Number(n) * k))
+		.join(",")
 
 const Flourish = ({ className }: { className?: string }) => (
-  <div aria-hidden className={cn("flex items-center gap-2", className)}>
-    <span
-      className="h-px flex-1"
-      style={{ background: "linear-gradient(90deg, transparent, rgba(90,65,25,0.5))" }}
-    />
-    <span className="h-[5px] w-[5px] rotate-45" style={{ background: "rgba(90,65,25,0.6)" }} />
-    <span
-      className="h-px flex-1"
-      style={{ background: "linear-gradient(270deg, transparent, rgba(90,65,25,0.5))" }}
-    />
-  </div>
-);
+	<div aria-hidden className={cn("flex items-center gap-2", className)}>
+		<span className="h-px flex-1" style={{ background: "linear-gradient(90deg, transparent, rgba(90,65,25,0.5))" }} />
+		<span className="h-[5px] w-[5px] rotate-45" style={{ background: "rgba(90,65,25,0.6)" }} />
+		<span className="h-px flex-1" style={{ background: "linear-gradient(270deg, transparent, rgba(90,65,25,0.5))" }} />
+	</div>
+)
+
+// page heading + flourish (inherits the ink colour from its page)
+const Head = ({ n, big }: { n: number; big?: boolean }) => (
+	<>
+		<h4 className={cn("leading-none font-normal italic", big ? "text-[30px]" : "text-[26px]")}>{PAGE_TITLES[n]}</h4>
+		<Flourish className={cn("mt-3", big ? "w-[170px]" : "w-40")} />
+	</>
+)
 
 const RightPage = ({
-  service,
-  index,
-  open,
-  onClose,
+	service,
+	index,
+	open,
+	onClose,
 }: {
-  service: Service;
-  index: number;
-  open: boolean;
-  onClose: () => void;
+	service: Service
+	index: number
+	open: boolean
+	onClose: () => void
 }) => {
-  const { title, accent, features, about, steps, faqs } = service;
-  const dark = shade(accent, 0.55); // ink colour for icons / rings
-  const btnTop = shade(accent, 0.74);
+	const { title, accent, features, about, steps, faqs } = service
+	const dark = shade(accent, 0.55) // ink colour for icons / rings
+	const btnTop = shade(accent, 0.74)
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [pg, setPg] = useState(0);
+	const scrollRef = useRef<HTMLDivElement>(null)
+	const [pg, setPg] = useState(0)
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    // scrolling / grabbing the page must not drag the whole book around
-    const stop = (e: Event) => e.stopPropagation();
-    let raf = 0;
-    const onScroll = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        let best = 0;
-        for (let i = 0; i < el.children.length; i++) {
-          if ((el.children[i] as HTMLElement).offsetTop - el.scrollTop <= el.clientHeight / 2) best = i;
-        }
-        setPg(best);
-      });
-    };
-    el.addEventListener("pointerdown", stop);
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      cancelAnimationFrame(raf);
-      el.removeEventListener("pointerdown", stop);
-      el.removeEventListener("scroll", onScroll);
-    };
-  }, []);
+	useEffect(() => {
+		const el = scrollRef.current
+		if (!el) return
+		// scrolling / grabbing the page must not drag the whole book around
+		const stop = (e: Event) => e.stopPropagation()
+		let raf = 0
+		const onScroll = () => {
+			cancelAnimationFrame(raf)
+			raf = requestAnimationFrame(() => {
+				let best = 0
+				for (let i = 0; i < el.children.length; i++) {
+					if ((el.children[i] as HTMLElement).offsetTop - el.scrollTop <= el.clientHeight / 2) best = i
+				}
+				setPg(best)
+			})
+		}
+		el.addEventListener("pointerdown", stop)
+		el.addEventListener("scroll", onScroll, { passive: true })
+		return () => {
+			cancelAnimationFrame(raf)
+			el.removeEventListener("pointerdown", stop)
+			el.removeEventListener("scroll", onScroll)
+		}
+	}, [])
 
-  const goTo = (i: number) => {
-    const el = scrollRef.current;
-    const target = el?.children[Math.min(PAGE_COUNT - 1, Math.max(0, i))] as HTMLElement | undefined;
-    if (!el || !target) return;
-    el.scrollTo({
-      top: target.offsetTop,
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-    });
-  };
+	const goTo = (i: number) => {
+		const el = scrollRef.current
+		const target = el?.children[clamp(i, 0, PAGE_COUNT - 1)] as HTMLElement | undefined
+		if (!el || !target) return
+		el.scrollTo({
+			top: target.offsetTop,
+			behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+		})
+	}
 
-  const stamp = {
-    color: `rgb(${dark})`,
-    border: `1.5px solid rgba(${dark},0.7)`,
-    background: `radial-gradient(circle at 35% 30%, rgba(${accent},0.3), rgba(${accent},0.1))`,
-  } as const;
+	const stamp = {
+		color: `rgb(${dark})`,
+		border: `1.5px solid rgba(${dark},0.7)`,
+		background: `radial-gradient(circle at 35% 30%, rgba(${accent},0.3), rgba(${accent},0.1))`,
+	} as const
 
-  return (
-    <div
-      className="relative h-full w-full overflow-hidden rounded-r-[4px]"
-      style={{
-        backgroundImage: [
-          PAPER_NOISE,
-          "radial-gradient(ellipse at 72% 18%, rgba(255,251,235,0.7), transparent 58%)",
-          "radial-gradient(circle at 16% 84%, rgba(150,105,45,0.18), transparent 30%)",
-          "radial-gradient(circle at 86% 62%, rgba(150,105,45,0.12), transparent 22%)",
-          "linear-gradient(160deg, #f1e7c9, #ddcb9f)",
-        ].join(", "),
-        backgroundSize: "240px 240px, auto, auto, auto, auto",
-        color: INK,
-        fontFamily: BOOK_FONT,
-      }}
-    >
-      {/* faint laid-paper fibres */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-60"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(110,80,35,0.05) 0px, rgba(110,80,35,0.05) 1px, transparent 1px, transparent 4px)",
-        }}
-      />
-      {/* aged, slightly darker edges */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          boxShadow: "inset 0 0 70px rgba(125,85,30,0.32), inset 0 0 6px rgba(90,60,20,0.3)",
-        }}
-      />
-      {/* gutter: the page curves down into the spine */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 bottom-0 left-0 w-[150px]"
-        style={{
-          background:
-            "linear-gradient(90deg, rgba(40,25,5,0.62), rgba(60,40,10,0.24) 28px, rgba(0,0,0,0) 72px, rgba(255,252,238,0.2) 112px, rgba(255,252,238,0) 150px)",
-        }}
-      />
-      {/* stacked page edges on the outer sides */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 right-0 bottom-0 w-[5px]"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(90deg, rgba(255,250,235,0.55) 0px, rgba(255,250,235,0.55) 1px, rgba(120,92,50,0.55) 1px, rgba(120,92,50,0.55) 2px)",
-          boxShadow: "inset 2px 0 3px rgba(60,40,10,0.35)",
-        }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute right-0 bottom-0 left-0 h-[4px]"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(255,250,235,0.55) 0px, rgba(255,250,235,0.55) 1px, rgba(120,92,50,0.55) 1px, rgba(120,92,50,0.55) 2px)",
-          boxShadow: "inset 0 2px 3px rgba(60,40,10,0.35)",
-        }}
-      />
-      {/* double ink frame */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-[14px] border"
-        style={{ borderColor: "rgba(80,55,20,0.38)" }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-[19px] border"
-        style={{ borderColor: "rgba(80,55,20,0.16)" }}
-      />
+	const arrow = (label: string, ch: string, to: number, off: boolean) => (
+		<button
+			type="button"
+			aria-label={label}
+			disabled={off}
+			onClick={() => goTo(to)}
+			className="flex h-5 w-5 cursor-pointer items-center justify-center text-[18px] leading-none transition-opacity disabled:cursor-default disabled:opacity-25"
+			style={{ color: INK_SOFT }}
+		>
+			{ch}
+		</button>
+	)
 
-      {/* silk bookmark ribbon hanging from the top edge */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-0 right-[96px]"
-        style={{ filter: "drop-shadow(1px 3px 3px rgba(40,25,5,0.4))" }}
-      >
-        <div
-          style={{
-            width: 24,
-            height: 86,
-            clipPath: "polygon(0 0, 100% 0, 100% 100%, 50% 83%, 0 100%)",
-            background: `linear-gradient(90deg, rgba(0,0,0,0.25), transparent 30%, rgba(255,255,255,0.2) 55%, rgba(0,0,0,0.22)), linear-gradient(180deg, rgb(${shade(accent, 0.85)}), rgb(${shade(accent, 0.58)}))`,
-          }}
-        />
-      </div>
+	return (
+		<div
+			className="relative h-full w-full overflow-hidden rounded-r-[4px]"
+			style={{
+				backgroundImage: [
+					PAPER_NOISE,
+					"radial-gradient(ellipse at 72% 18%, rgba(255,251,235,0.7), transparent 58%)",
+					"radial-gradient(circle at 16% 84%, rgba(150,105,45,0.18), transparent 30%)",
+					"radial-gradient(circle at 86% 62%, rgba(150,105,45,0.12), transparent 22%)",
+					"linear-gradient(160deg, #f1e7c9, #ddcb9f)",
+				].join(", "),
+				backgroundSize: "240px 240px, auto, auto, auto, auto",
+				color: INK,
+				fontFamily: BOOK_FONT,
+			}}
+		>
+			{/* faint laid-paper fibres */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0 opacity-60"
+				style={{
+					backgroundImage:
+						"repeating-linear-gradient(0deg, rgba(110,80,35,0.05) 0px, rgba(110,80,35,0.05) 1px, transparent 1px, transparent 4px)",
+				}}
+			/>
+			{/* aged edges */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-0"
+				style={{ boxShadow: "inset 0 0 70px rgba(125,85,30,0.32), inset 0 0 6px rgba(90,60,20,0.3)" }}
+			/>
+			{/* gutter: the page curves down into the spine */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-0 bottom-0 left-0 w-[150px]"
+				style={{
+					background:
+						"linear-gradient(90deg, rgba(40,25,5,0.62), rgba(60,40,10,0.24) 28px, rgba(0,0,0,0) 72px, rgba(255,252,238,0.2) 112px, rgba(255,252,238,0) 150px)",
+				}}
+			/>
+			{/* stacked page edges on the outer sides */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-0 right-0 bottom-0 w-[5px]"
+				style={{
+					backgroundImage:
+						"repeating-linear-gradient(90deg, rgba(255,250,235,0.55) 0px, rgba(255,250,235,0.55) 1px, rgba(120,92,50,0.55) 1px, rgba(120,92,50,0.55) 2px)",
+					boxShadow: "inset 2px 0 3px rgba(60,40,10,0.35)",
+				}}
+			/>
+			<div
+				aria-hidden
+				className="pointer-events-none absolute right-0 bottom-0 left-0 h-[4px]"
+				style={{
+					backgroundImage:
+						"repeating-linear-gradient(0deg, rgba(255,250,235,0.55) 0px, rgba(255,250,235,0.55) 1px, rgba(120,92,50,0.55) 1px, rgba(120,92,50,0.55) 2px)",
+					boxShadow: "inset 0 2px 3px rgba(60,40,10,0.35)",
+				}}
+			/>
+			{/* double ink frame */}
+			<div aria-hidden className="pointer-events-none absolute inset-[14px] border" style={{ borderColor: "rgba(80,55,20,0.38)" }} />
+			<div aria-hidden className="pointer-events-none absolute inset-[19px] border" style={{ borderColor: "rgba(80,55,20,0.16)" }} />
 
-      <motion.div
-        className="relative flex h-full flex-col px-10 pt-10 pb-[56px]"
-        initial={false}
-        animate={{ opacity: open ? 1 : 0 }}
-        transition={{ duration: 0.4, delay: open ? 0.75 : 0 }}
-        style={{ textShadow: "0 0 0.5px rgba(38,25,10,0.45)" }}
-      >
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="absolute top-8 right-8 z-10 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border text-lg leading-none transition-colors hover:bg-black/10"
-          style={{
-            borderColor: "rgba(80,55,20,0.45)",
-            color: INK,
-            background: "rgba(255,248,225,0.35)",
-            fontFamily: BOOK_FONT,
-          }}
-        >
-          ×
-        </button>
+			{/* silk bookmark ribbon */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute top-0 right-[96px]"
+				style={{ filter: "drop-shadow(1px 3px 3px rgba(40,25,5,0.4))" }}
+			>
+				<div
+					style={{
+						width: 24,
+						height: 86,
+						clipPath: "polygon(0 0, 100% 0, 100% 100%, 50% 83%, 0 100%)",
+						background: `linear-gradient(90deg, rgba(0,0,0,0.25), transparent 30%, rgba(255,255,255,0.2) 55%, rgba(0,0,0,0.22)), linear-gradient(180deg, rgb(${shade(accent, 0.85)}), rgb(${shade(accent, 0.58)}))`,
+					}}
+				/>
+			</div>
 
-        <span
-          className="text-[10px] font-semibold tracking-[0.4em] uppercase"
-          style={{ color: INK_SOFT }}
-        >
-          Chapter {ROMAN[index] ?? index + 1} · Page {pg + 1}/{PAGE_COUNT}
-        </span>
+			<motion.div
+				className="relative flex h-full flex-col px-10 pt-10 pb-[56px]"
+				initial={false}
+				animate={{ opacity: open ? 1 : 0 }}
+				transition={{ duration: 0.4, delay: open ? 0.75 : 0 }}
+				style={{ textShadow: "0 0 0.5px rgba(38,25,10,0.45)" }}
+			>
+				<button
+					type="button"
+					onClick={onClose}
+					aria-label="Close"
+					className="absolute top-8 right-8 z-10 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border text-lg leading-none transition-colors hover:bg-black/10"
+					style={{
+						borderColor: "rgba(80,55,20,0.45)",
+						color: INK,
+						background: "rgba(255,248,225,0.35)",
+						fontFamily: BOOK_FONT,
+					}}
+				>
+					×
+				</button>
 
-        {/* the 3 pages: scroll (wheel / swipe / arrow keys) or use the dots below */}
-        <div
-          ref={scrollRef}
-          tabIndex={0}
-          role="region"
-          aria-label={`${title}: details, page ${pg + 1} of ${PAGE_COUNT}`}
-          className="relative mt-1 min-h-0 flex-1 snap-y snap-mandatory overflow-y-auto overscroll-contain rounded-[2px] outline-none [scrollbar-width:none] focus-visible:ring-1 focus-visible:ring-[#8a6a2a]/60 [&::-webkit-scrollbar]:hidden"
-          style={{ touchAction: "pan-y" }}
-        >
-          {/* page 1: what's included */}
-          <section className="flex min-h-full snap-start flex-col">
-            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
-              {PAGE_TITLES[0]}
-            </h4>
-            <Flourish className="mt-3 w-[170px]" />
+				<span className="text-[10px] font-semibold tracking-[0.4em] uppercase" style={{ color: INK_SOFT }}>
+					Chapter {ROMAN[index] ?? index + 1} · Page {pg + 1}/{PAGE_COUNT}
+				</span>
 
-            <div className="mt-3 flex flex-1 flex-col justify-center">
-              {features.map((f, i) => (
-                <motion.div
-                  key={f.title}
-                  initial={false}
-                  animate={{ opacity: open ? 1 : 0, y: open ? 0 : 10 }}
-                  transition={{ duration: 0.4, delay: open ? 0.85 + i * 0.1 : 0 }}
-                >
-                  <div className="flex items-center gap-4 py-3">
-                    {/* ink-stamp style icon */}
-                    <div
-                      className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full"
-                      style={{
-                        ...stamp,
-                        boxShadow: `inset 0 0 0 3px rgba(255,248,225,0.5), inset 0 0 0 4px rgba(${dark},0.35)`,
-                      }}
-                    >
-                      {f.icon}
-                    </div>
-                    <div>
-                      <div className="text-[16px] leading-tight font-semibold" style={{ color: INK }}>
-                        {f.title}
-                      </div>
-                      <div className="mt-0.5 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
-                        {f.desc}
-                      </div>
-                    </div>
-                  </div>
-                  {i < features.length - 1 && <Flourish className="opacity-70" />}
-                </motion.div>
-              ))}
-            </div>
-          </section>
+				{/* the 3 pages: scroll (wheel / swipe / arrow keys) or use the dots below */}
+				<div
+					ref={scrollRef}
+					tabIndex={0}
+					role="region"
+					aria-label={`${title}: details, page ${pg + 1} of ${PAGE_COUNT}`}
+					className="relative mt-1 min-h-0 flex-1 snap-y snap-mandatory overflow-y-auto overscroll-contain rounded-[2px] outline-none [scrollbar-width:none] focus-visible:ring-1 focus-visible:ring-[#8a6a2a]/60 [&::-webkit-scrollbar]:hidden"
+					style={{ touchAction: "pan-y" }}
+				>
+					<section className="flex min-h-full snap-start flex-col">
+						<Head n={0} big />
+						<div className="mt-3 flex flex-1 flex-col justify-center">
+							{features.map((f, i) => (
+								<motion.div
+									key={f.title}
+									initial={false}
+									animate={{ opacity: open ? 1 : 0, y: open ? 0 : 10 }}
+									transition={{ duration: 0.4, delay: open ? 0.85 + i * 0.1 : 0 }}
+								>
+									<div className="flex items-center gap-4 py-3">
+										{/* ink-stamp style icon */}
+										<div
+											className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full"
+											style={{
+												...stamp,
+												boxShadow: `inset 0 0 0 3px rgba(255,248,225,0.5), inset 0 0 0 4px rgba(${dark},0.35)`,
+											}}
+										>
+											{f.icon}
+										</div>
+										<div>
+											<div className="text-[16px] leading-tight font-semibold">{f.title}</div>
+											<div className="mt-0.5 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
+												{f.desc}
+											</div>
+										</div>
+									</div>
+									{i < features.length - 1 && <Flourish className="opacity-70" />}
+								</motion.div>
+							))}
+						</div>
+					</section>
 
-          {/* page 2: how it works */}
-          <section className="flex min-h-full snap-start flex-col">
-            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
-              {PAGE_TITLES[1]}
-            </h4>
-            <Flourish className="mt-3 w-[170px]" />
-            <p className="mt-3 text-[13.5px] leading-snug italic" style={{ color: INK_SOFT }}>
-              {about}
-            </p>
-            <ol className="mt-3 flex flex-1 flex-col justify-center gap-3">
-              {steps.map(([t, d], i) => (
-                <li key={t} className="flex items-center gap-3">
-                  <span
-                    className="flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-full text-[15px] font-semibold"
-                    style={stamp}
-                  >
-                    {i + 1}
-                  </span>
-                  <div>
-                    <div className="text-[15px] leading-tight font-semibold" style={{ color: INK }}>
-                      {t}
-                    </div>
-                    <div className="mt-0.5 text-[12.5px] leading-snug italic" style={{ color: INK_SOFT }}>
-                      {d}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </section>
+					<section className="flex min-h-full snap-start flex-col">
+						<Head n={1} big />
+						<p className="mt-3 text-[13.5px] leading-snug italic" style={{ color: INK_SOFT }}>
+							{about}
+						</p>
+						<ol className="mt-3 flex flex-1 flex-col justify-center gap-3">
+							{steps.map(([t, d], i) => (
+								<li key={t} className="flex items-center gap-3">
+									<span
+										className="flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-full text-[15px] font-semibold"
+										style={stamp}
+									>
+										{i + 1}
+									</span>
+									<div>
+										<div className="text-[15px] leading-tight font-semibold">{t}</div>
+										<div className="mt-0.5 text-[12.5px] leading-snug italic" style={{ color: INK_SOFT }}>
+											{d}
+										</div>
+									</div>
+								</li>
+							))}
+						</ol>
+					</section>
 
-          {/* page 3: FAQ */}
-          <section className="flex min-h-full snap-start flex-col">
-            <h4 className="text-[30px] leading-none font-normal italic" style={{ color: INK }}>
-              {PAGE_TITLES[2]}
-            </h4>
-            <Flourish className="mt-3 w-[170px]" />
-            <div className="mt-3 flex flex-1 flex-col justify-center gap-5">
-              {faqs.map(([q, a]) => (
-                <div key={q}>
-                  <h5 className="text-[15px] leading-tight font-semibold" style={{ color: INK }}>
-                    {q}
-                  </h5>
-                  <p className="mt-1 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
-                    {a}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
+					<section className="flex min-h-full snap-start flex-col">
+						<Head n={2} big />
+						<div className="mt-3 flex flex-1 flex-col justify-center gap-5">
+							{faqs.map(([q, a]) => (
+								<div key={q}>
+									<h5 className="text-[15px] leading-tight font-semibold">{q}</h5>
+									<p className="mt-1 text-[13px] leading-snug italic" style={{ color: INK_SOFT }}>
+										{a}
+									</p>
+								</div>
+							))}
+						</div>
+					</section>
+				</div>
 
-        <a
-          href="#contact"
-          onClick={onClose}
-          className="relative mt-4 flex items-center justify-center gap-2 rounded-[3px] py-3 text-[13px] font-semibold tracking-[0.28em] uppercase transition-transform hover:scale-[1.02]"
-          style={{
-            fontFamily: BOOK_FONT,
-            color: "#fff6dc",
-            textShadow: "0 1px 1px rgba(0,0,0,0.45)",
-            background: `linear-gradient(180deg, rgb(${btnTop}), rgb(${shade(accent, 0.5)}))`,
-            boxShadow: `0 2px 0 rgba(0,0,0,0.25), 0 8px 16px rgba(${dark},0.35), inset 0 0 0 1px rgba(255,236,190,0.5)`,
-          }}
-        >
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-[3px] rounded-[2px] border border-dashed"
-            style={{ borderColor: "rgba(255,236,190,0.45)" }}
-          />
-          Get Started <span>→</span>
-        </a>
+				<a
+					href="#contact"
+					onClick={onClose}
+					className="relative mt-4 flex items-center justify-center gap-2 rounded-[3px] py-3 text-[13px] font-semibold tracking-[0.28em] uppercase transition-transform hover:scale-[1.02]"
+					style={{
+						fontFamily: BOOK_FONT,
+						color: "#fff6dc",
+						textShadow: "0 1px 1px rgba(0,0,0,0.45)",
+						background: `linear-gradient(180deg, rgb(${btnTop}), rgb(${shade(accent, 0.5)}))`,
+						boxShadow: `0 2px 0 rgba(0,0,0,0.25), 0 8px 16px rgba(${dark},0.35), inset 0 0 0 1px rgba(255,236,190,0.5)`,
+					}}
+				>
+					<span
+						aria-hidden
+						className="pointer-events-none absolute inset-[3px] rounded-[2px] border border-dashed"
+						style={{ borderColor: "rgba(255,236,190,0.45)" }}
+					/>
+					Get Started <span>→</span>
+				</a>
 
-        {/* pager: prev / dots / next */}
-        <div className="absolute right-0 bottom-[22px] left-0 flex items-center justify-center gap-3">
-          <button
-            type="button"
-            aria-label="Previous page"
-            disabled={pg === 0}
-            onClick={() => goTo(pg - 1)}
-            className="flex h-5 w-5 cursor-pointer items-center justify-center text-[18px] leading-none transition-opacity disabled:cursor-default disabled:opacity-25"
-            style={{ color: INK_SOFT }}
-          >
-            ‹
-          </button>
-          {PAGE_TITLES.map((t, i) => (
-            <button
-              key={t}
-              type="button"
-              aria-label={`Go to page ${i + 1}: ${t}`}
-              aria-current={pg === i}
-              onClick={() => goTo(i)}
-              className="h-[7px] cursor-pointer rounded-full transition-all"
-              style={{
-                width: pg === i ? 18 : 7,
-                background: pg === i ? INK_SOFT : "rgba(90,65,25,0.28)",
-              }}
-            />
-          ))}
-          <button
-            type="button"
-            aria-label="Next page"
-            disabled={pg === PAGE_COUNT - 1}
-            onClick={() => goTo(pg + 1)}
-            className="flex h-5 w-5 cursor-pointer items-center justify-center text-[18px] leading-none transition-opacity disabled:cursor-default disabled:opacity-25"
-            style={{ color: INK_SOFT }}
-          >
-            ›
-          </button>
-        </div>
-      </motion.div>
+				{/* pager: prev / dots / next */}
+				<div className="absolute right-0 bottom-[22px] left-0 flex items-center justify-center gap-3">
+					{arrow("Previous page", "‹", pg - 1, pg === 0)}
+					{PAGE_TITLES.map((t, i) => (
+						<button
+							key={t}
+							type="button"
+							aria-label={`Go to page ${i + 1}: ${t}`}
+							aria-current={pg === i}
+							onClick={() => goTo(i)}
+							className="h-[7px] cursor-pointer rounded-full transition-all"
+							style={{ width: pg === i ? 18 : 7, background: pg === i ? INK_SOFT : "rgba(90,65,25,0.28)" }}
+						/>
+					))}
+					{arrow("Next page", "›", pg + 1, pg === PAGE_COUNT - 1)}
+				</div>
+			</motion.div>
 
-      {/* turned-up page corner */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute right-0 bottom-0 h-[38px] w-[38px]"
-        style={{ filter: "drop-shadow(-2px -2px 3px rgba(50,30,8,0.4))" }}
-      >
-        <div
-          className="absolute inset-0"
-          style={{
-            clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
-            background:
-              "linear-gradient(to bottom right, rgba(70,48,15,0.6), rgb(196,177,131) 55%)",
-          }}
-        />
-        <div
-          className="absolute inset-0"
-          style={{
-            clipPath: "polygon(0 0, 100% 0, 0 100%)",
-            background: "linear-gradient(135deg, #f6edd3 0%, #dccb9f 85%)",
-          }}
-        />
-      </div>
-    </div>
-  );
-};
+			{/* turned-up page corner */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute right-0 bottom-0 h-[38px] w-[38px]"
+				style={{ filter: "drop-shadow(-2px -2px 3px rgba(50,30,8,0.4))" }}
+			>
+				<div
+					className="absolute inset-0"
+					style={{
+						clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+						background: "linear-gradient(to bottom right, rgba(70,48,15,0.6), rgb(196,177,131) 55%)",
+					}}
+				/>
+				<div
+					className="absolute inset-0"
+					style={{
+						clipPath: "polygon(0 0, 100% 0, 0 100%)",
+						background: "linear-gradient(135deg, #f6edd3 0%, #dccb9f 85%)",
+					}}
+				/>
+			</div>
+		</div>
+	)
+}
 
-/* ---------------- RICH path: a 3D book that opens in place (fine pointer, decent hardware) ---------------- */
-
-const COVER_EASE = [0.55, 0.02, 0.2, 1] as const;
+/* ---------------- RICH path: a 3D book that opens in place ---------------- */
 
 // custom properties read by the .sb-edge pseudo-element CSS
-const edgeVars = (dir: string, base: string) =>
-  ({ "--d": dir, "--board": `rgb(${base})` }) as React.CSSProperties;
+const edgeVars = (dir: string, base: string) => ({ "--d": dir, "--board": `rgb(${base})` }) as CSSProperties
 
-type Fit = { scale: number; dx: number; dy: number };
+const BOARD_BORDER = `1px solid rgba(${GOLD},0.4)`
+const BOARD_SHADOW = "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)"
+const BAND = {
+	borderTop: `1px solid rgba(${GOLD},0.7)`,
+	borderBottom: `1px solid rgba(${GOLD},0.7)`,
+	background: `rgba(${GOLD},0.12)`,
+}
+
+type Fit = { scale: number; dx: number; dy: number }
 
 type BookProps = {
-  service: Service;
-  index: number;
-  unit: number; // card size relative to desktop (0.55 - 1)
-  open: boolean;
-  onOpen: (index: number) => void;
-  onClose: () => void;
-  /** tells the parent how big the open book is, so dragging can keep it inside the section */
-  onFit?: (fit: Fit) => void;
-};
+	service: Service
+	index: number
+	unit: number // card size relative to desktop (0.55 - 1)
+	open: boolean
+	onOpen: (index: number) => void
+	onClose: () => void
+	/** tells the parent how big the open book is, so dragging can keep it inside the section */
+	onFit?: (fit: Fit) => void
+}
 
-const BookCard3DBase = ({ service, index, unit, open, onOpen, onClose, onFit }: BookProps) => {
-  const { title, accent, base } = service;
-  const rootRef = useRef<HTMLDivElement>(null);
-  const pageRef = useRef<HTMLDivElement>(null);
-  // only count it as a click if the pointer barely moved (so dragging never opens the book)
-  const down = useRef<{ x: number; y: number } | null>(null);
-  const [hovered, setHovered] = useState(false);
-  const [fit, setFit] = useState<Fit>({ scale: OPEN_SCALE_MAX, dx: 0, dy: 0 });
-  const onFitRef = useRef(onFit);
-  onFitRef.current = onFit;
+const BookCard3D = memo(function BookCard3D({ service, index, unit, open, onOpen, onClose, onFit }: BookProps) {
+	const { title, accent, base } = service
+	const rootRef = useRef<HTMLDivElement>(null)
+	const pageRef = useRef<HTMLDivElement>(null)
+	const [hovered, setHovered] = useState(false)
+	const [fit, setFit] = useState<Fit>({ scale: OPEN_SCALE_MAX, dx: 0, dy: 0 })
+	const tap = useTap(() => !open && onOpen(index), 6)
 
-  // The heavy "open book" parts (boards, page stacks, fold, both pages) only exist in the DOM
-  // while the book is open, or just before (hover intent / focus / press) and just after (close animation).
-  const [warm, setWarm] = useState(false);
-  const show = open || warm;
-  const warmTimer = useRef(0);
-  // low-priority mount so a hover never blocks the tilt / hover animation
-  const warmUp = useCallback(() => startTransition(() => setWarm(true)), []);
-  useEffect(() => () => clearTimeout(warmTimer.current), []);
+	// The heavy open-book parts only exist while the book is open, or just before (hover intent / focus / press)
+	// and just after (close animation).
+	const [warm, setWarm] = useState(false)
+	const show = open || warm
+	const warmTimer = useRef(0)
+	// low-priority mount so a hover never blocks the tilt / hover animation
+	const warmUp = useCallback(() => startTransition(() => setWarm(true)), [])
+	useEffect(() => () => clearTimeout(warmTimer.current), [])
 
-  // unmount the open-book parts a while after closing, but never while the pointer is still on the book
-  useEffect(() => {
-    if (open || !warm || hovered) return;
-    const id = setTimeout(() => setWarm(false), 1600);
-    return () => clearTimeout(id);
-  }, [open, warm, hovered]);
+	// unmount the open-book parts a while after closing, but never while the pointer is still on the book
+	useEffect(() => {
+		if (open || !warm || hovered) return
+		const id = setTimeout(() => setWarm(false), 1600)
+		return () => clearTimeout(id)
+	}, [open, warm, hovered])
 
-  // the info page sits under the cover while closed: keep its links out of the tab order / screen readers
-  useEffect(() => {
-    pageRef.current?.toggleAttribute("inert", !open);
-  }, [open, show]);
+	// the info page sits under the cover while closed: keep its links out of the tab order / screen readers
+	useEffect(() => {
+		pageRef.current?.toggleAttribute("inert", !open)
+	}, [open, show])
 
-  // when opening, work out how big the open book can be and how far to nudge it so it stays inside the section
-  useEffect(() => {
-    if (!open) return;
-    const card = rootRef.current?.parentElement;
-    const area = card?.offsetParent as HTMLElement | null | undefined;
-    if (!card || !area) return;
-    const a = area.getBoundingClientRect();
-    const c = card.getBoundingClientRect();
-    const cx = c.left + c.width / 2 - a.left;
-    const cy = c.top + c.height / 2 - a.top;
-    const margin = 16;
-    const scale = Math.max(
-      0.3,
-      Math.min(
-        OPEN_SCALE_MAX,
-        (a.width - margin * 2) / (PAGE_W * 2),
-        (a.height - margin * 2) / PAGE_H,
-      ),
-    );
-    const hw = PAGE_W * scale;
-    const hh = (PAGE_H * scale) / 2;
-    const clampTo = (v: number, min: number, max: number) =>
-      Math.min(Math.max(v, min), Math.max(min, max));
-    const next = {
-      scale,
-      dx: clampTo(cx, hw + margin, a.width - hw - margin) - cx,
-      dy: clampTo(cy, hh + margin, a.height - hh - margin) - cy,
-    };
-    setFit(next);
-    onFitRef.current?.(next);
-  }, [open]);
+	// when opening, work out how big the open book can be and how far to nudge it so it stays inside the section
+	useEffect(() => {
+		if (!open) return
+		const card = rootRef.current?.parentElement
+		const area = card?.offsetParent as HTMLElement | null | undefined
+		if (!card || !area) return
+		const a = area.getBoundingClientRect()
+		const c = card.getBoundingClientRect()
+		const cx = c.left + c.width / 2 - a.left
+		const cy = c.top + c.height / 2 - a.top
+		const margin = 16
+		const scale = clamp(Math.min((a.width - margin * 2) / (PAGE_W * 2), (a.height - margin * 2) / PAGE_H), 0.3, OPEN_SCALE_MAX)
+		const hw = PAGE_W * scale
+		const hh = (PAGE_H * scale) / 2
+		const pin = (v: number, lo: number, hi: number) => clamp(v, lo, Math.max(lo, hi))
+		const next = {
+			scale,
+			dx: pin(cx, hw + margin, a.width - hw - margin) - cx,
+			dy: pin(cy, hh + margin, a.height - hh - margin) - cy,
+		}
+		setFit(next)
+		onFit?.(next)
+	}, [open, onFit])
 
-  // timings: the cover swings slowly at first, speeds up, then settles; closing is a touch quicker
-  const dur = open ? 1.2 : 0.95;
-  const delay = open ? 0.08 : 0;
-  const half = dur * 0.5;
-  const faceT = { duration: 0.35, delay: open ? 0 : 0.6 };
-  const faceFade = { opacity: open ? 0 : 1 };
-  const t = { duration: open ? 0.95 : 0.8, ease: EASE };
+	// the cover swings slowly at first, speeds up, then settles; closing is a touch quicker
+	const dur = open ? 1.2 : 0.95
+	const delay = open ? 0.08 : 0
+	const half = dur * 0.5
+	const faceT = { duration: 0.35, delay: open ? 0 : 0.6 }
+	const faceFade = { opacity: open ? 0 : 1 }
+	const t = { duration: open ? 0.95 : 0.8, ease: EASE }
 
-  return (
-    <div
-      ref={rootRef}
-      role={open ? undefined : "button"}
-      tabIndex={open ? -1 : 0}
-      aria-label={open ? undefined : `Open ${title}`}
-      className={cn(
-        "relative h-full w-full rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[#e8c476]/80",
-        open ? "cursor-grab select-text active:cursor-grabbing" : "cursor-pointer select-none",
-      )}
-      onKeyDown={(e) => {
-        if (!open && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          onOpen(index);
-        }
-      }}
-      onFocus={warmUp}
-      onPointerEnter={(e) => {
-        if (e.pointerType === "mouse") {
-          setHovered(true);
-          // hover intent: ignore fly-over hovers while the mouse sweeps across the pile
-          clearTimeout(warmTimer.current);
-          warmTimer.current = window.setTimeout(warmUp, 140);
-        }
-      }}
-      onPointerLeave={() => {
-        setHovered(false);
-        clearTimeout(warmTimer.current);
-      }}
-      onPointerDown={(e) => {
-        down.current = { x: e.clientX, y: e.clientY };
-        clearTimeout(warmTimer.current);
-        setWarm(true); // a press is immediate
-      }}
-      onPointerUp={(e) => {
-        const d = down.current;
-        down.current = null;
-        if (!open && d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) onOpen(index);
-      }}
-    >
-      {/* anchor at the card centre */}
-      <div className="pointer-events-none absolute top-1/2 left-1/2 h-0 w-0">
-        {/* the whole spread (2 pages wide), scaled; grows when open */}
-        <motion.div
-          className="pointer-events-none"
-          initial={false}
-          animate={{
-            x: open ? fit.dx : 0,
-            y: open ? fit.dy : 0,
-            scale: open ? fit.scale : CARD_SCALE * unit,
-          }}
-          transition={t}
-          style={{
-            width: PAGE_W * 2,
-            height: PAGE_H,
-            marginLeft: -PAGE_W,
-            marginTop: -PAGE_H / 2,
-          }}
-        >
-          {/* ambient occlusion + contact shadow under the book (widens when the book opens) */}
-          <motion.div
-            aria-hidden
-            className="pointer-events-none absolute"
-            initial={false}
-            animate={{ scaleX: open ? 1 : 0.52, opacity: open ? 0.95 : 0.8 }}
-            transition={t}
-            style={{
-              left: PAGE_W * 0.04,
-              width: PAGE_W * 1.92,
-              top: PAGE_H - 26,
-              height: 64,
-              background:
-                "radial-gradient(ellipse 48% 20% at 50% 40%, rgba(0,0,0,0.7), transparent 100%), radial-gradient(ellipse 50% 50% at 50% 50%, rgba(0,0,0,0.38), transparent 100%)",
-            }}
-          />
+	return (
+		<div
+			ref={rootRef}
+			role={open ? undefined : "button"}
+			tabIndex={open ? -1 : 0}
+			aria-label={open ? undefined : `Open ${title}`}
+			className={cn(
+				"relative h-full w-full rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[#e8c476]/80",
+				open ? "cursor-grab select-text active:cursor-grabbing" : "cursor-pointer select-none"
+			)}
+			onKeyDown={open ? undefined : activate(() => onOpen(index))}
+			onFocus={warmUp}
+			onPointerEnter={(e) => {
+				if (e.pointerType !== "mouse") return
+				setHovered(true)
+				// hover intent: ignore fly-over hovers while the mouse sweeps across the pile
+				clearTimeout(warmTimer.current)
+				warmTimer.current = window.setTimeout(warmUp, 140)
+			}}
+			onPointerLeave={() => {
+				setHovered(false)
+				clearTimeout(warmTimer.current)
+			}}
+			onPointerDown={(e) => {
+				tap.onPointerDown(e)
+				clearTimeout(warmTimer.current)
+				setWarm(true) // a press is immediate
+			}}
+			onPointerUp={tap.onPointerUp}
+			onPointerCancel={tap.onPointerCancel}
+		>
+			{/* anchor at the card centre */}
+			<div className="pointer-events-none absolute top-1/2 left-1/2 h-0 w-0">
+				{/* the whole spread (2 pages wide), scaled; grows when open */}
+				<motion.div
+					className="pointer-events-none"
+					initial={false}
+					animate={{ x: open ? fit.dx : 0, y: open ? fit.dy : 0, scale: open ? fit.scale : CARD_SCALE * unit }}
+					transition={t}
+					style={{ width: PAGE_W * 2, height: PAGE_H, marginLeft: -PAGE_W, marginTop: -PAGE_H / 2 }}
+				>
+					{/* contact shadow under the book (widens when the book opens) */}
+					<motion.div
+						aria-hidden
+						className="pointer-events-none absolute"
+						initial={false}
+						animate={{ scaleX: open ? 1 : 0.52, opacity: open ? 0.95 : 0.8 }}
+						transition={t}
+						style={{
+							left: PAGE_W * 0.04,
+							width: PAGE_W * 1.92,
+							top: PAGE_H - 26,
+							height: 64,
+							background:
+								"radial-gradient(ellipse 48% 20% at 50% 40%, rgba(0,0,0,0.7), transparent 100%), radial-gradient(ellipse 50% 50% at 50% 50%, rgba(0,0,0,0.38), transparent 100%)",
+						}}
+					/>
 
-          <div className="pointer-events-none" style={{ perspective: 1800, width: "100%", height: "100%" }}>
-            {/* book group: closed = turned 3D book on the right half, open = flat spread */}
-            <motion.div
-              className="pointer-events-none relative h-full w-full"
-              initial={false}
-              animate={{
-                x: open ? 0 : -PAGE_W / 2,
-                rotateY: open ? 0 : hovered ? 12 : 26,
-                rotateX: open ? 0 : hovered ? -4 : -6,
-              }}
-              transition={t}
-              style={{ transformStyle: "preserve-3d", transformOrigin: "75% 50%" }}
-            >
-              {/* open-book parts: only mounted when needed */}
-              {show && (
-                <>
-                  {/* hardcover boards (they stick out a little past the pages), left half */}
-                  <motion.div
-                    aria-hidden
-                    className="sb-lt absolute rounded-l-lg"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
-                    style={{
-                      z: -THICK / 2,
-                      top: -12,
-                      left: -14,
-                      width: PAGE_W + 14,
-                      height: PAGE_H + 24,
-                      backgroundImage: `linear-gradient(145deg, rgb(${base}), #050a22 80%)`,
-                      border: `1px solid rgba(${GOLD},0.4)`,
-                      boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
-                    }}
-                  />
-                  {/* hardcover boards, right half */}
-                  <motion.div
-                    aria-hidden
-                    className="sb-lt absolute rounded-r-lg"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
-                    style={{
-                      z: -THICK / 2,
-                      top: -12,
-                      left: PAGE_W,
-                      width: PAGE_W + 14,
-                      height: PAGE_H + 24,
-                      backgroundImage: `linear-gradient(215deg, rgb(${base}), #050a22 80%)`,
-                      border: `1px solid rgba(${GOLD},0.4)`,
-                      boxShadow: "inset 0 0 22px rgba(0,0,0,0.55), 0 6px 18px rgba(0,0,0,0.45)",
-                    }}
-                  />
+					<div className="pointer-events-none" style={{ perspective: 1800, width: "100%", height: "100%" }}>
+						{/* book group: closed = turned 3D book on the right half, open = flat spread */}
+						<motion.div
+							className="pointer-events-none relative h-full w-full"
+							initial={false}
+							animate={{
+								x: open ? 0 : -PAGE_W / 2,
+								rotateY: open ? 0 : hovered ? 12 : 26,
+								rotateX: open ? 0 : hovered ? -4 : -6,
+							}}
+							transition={t}
+							style={{ transformStyle: "preserve-3d", transformOrigin: "75% 50%" }}
+						>
+							{show && (
+								<>
+									{/* hardcover boards (stick out a little past the pages) */}
+									{(
+										[
+											["rounded-l-lg", -14, 145],
+											["rounded-r-lg", PAGE_W, 215],
+										] as const
+									).map(([round, left, deg]) => (
+										<motion.div
+											key={left}
+											aria-hidden
+											className={`sb-lt absolute ${round}`}
+											initial={false}
+											animate={{ opacity: open ? 1 : 0 }}
+											transition={{ duration: 0.6, delay: open ? 0.3 : 0 }}
+											style={{
+												z: -THICK / 2,
+												top: -12,
+												left,
+												width: PAGE_W + 14,
+												height: PAGE_H + 24,
+												backgroundImage: `linear-gradient(${deg}deg, rgb(${base}), #050a22 80%)`,
+												border: BOARD_BORDER,
+												boxShadow: BOARD_SHADOW,
+											}}
+										/>
+									))}
 
-                  {/* page stacks under the open spread (layered leaves via ::before / ::after) */}
-                  <motion.div
-                    aria-hidden
-                    className="sb-stack sb-stack-l absolute"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
-                    style={{ z: -2, left: 0, top: 0, width: PAGE_W, height: PAGE_H }}
-                  />
-                  <motion.div
-                    aria-hidden
-                    className="sb-stack sb-stack-r absolute"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
-                    style={{ z: -2, left: PAGE_W, top: 0, width: PAGE_W, height: PAGE_H }}
-                  />
-                </>
-              )}
+									{/* page stacks under the open spread (layered leaves via ::before / ::after) */}
+									{(["l", "r"] as const).map((s) => (
+										<motion.div
+											key={s}
+											aria-hidden
+											className={`sb-stack sb-stack-${s} absolute`}
+											initial={false}
+											animate={{ opacity: open ? 1 : 0 }}
+											transition={{ duration: 0.4, delay: open ? 0.4 : 0 }}
+											style={{ z: -2, left: s === "l" ? 0 : PAGE_W, top: 0, width: PAGE_W, height: PAGE_H }}
+										/>
+									))}
+								</>
+							)}
 
-              {/* back cover (closed 3D book only) */}
-              <motion.div
-                className="sb-lt absolute rounded-md"
-                initial={false}
-                animate={faceFade}
-                transition={faceT}
-                style={{
-                  z: -THICK / 2,
-                  rotateY: 180,
-                  left: PAGE_W,
-                  top: 0,
-                  width: PAGE_W,
-                  height: PAGE_H,
-                  backgroundImage: `linear-gradient(150deg, rgb(${base}), #02040f)`,
-                }}
-              />
+							{/* back cover (closed 3D book only) */}
+							<motion.div
+								className="sb-lt absolute rounded-md"
+								initial={false}
+								animate={faceFade}
+								transition={faceT}
+								style={{
+									z: -THICK / 2,
+									rotateY: 180,
+									left: PAGE_W,
+									top: 0,
+									width: PAGE_W,
+									height: PAGE_H,
+									backgroundImage: `linear-gradient(150deg, rgb(${base}), #02040f)`,
+								}}
+							/>
 
-              {/* spine: rounded like a real binding */}
-              <motion.div
-                className="sb-lt pointer-events-auto absolute top-0 flex items-center justify-center overflow-hidden"
-                initial={false}
-                animate={faceFade}
-                transition={faceT}
-                style={{
-                  rotateY: -90,
-                  left: PAGE_W - THICK / 2,
-                  width: THICK,
-                  height: PAGE_H,
-                  backgroundImage: `linear-gradient(90deg, rgba(0,0,0,0.65), rgb(${base}) 16%, rgba(${accent},0.22) 42%, rgba(255,255,255,0.05) 50%, rgb(${base}) 66%, rgba(0,0,0,0.7))`,
-                  boxShadow: "inset 0 0 14px rgba(0,0,0,0.5)",
-                }}
-              >
-                {["7%", "93%"].map((top) => (
-                  <span
-                    key={top}
-                    className="absolute inset-x-0 h-[9px] -translate-y-1/2"
-                    style={{
-                      top,
-                      borderTop: `1px solid rgba(${GOLD},0.7)`,
-                      borderBottom: `1px solid rgba(${GOLD},0.7)`,
-                      background: `rgba(${GOLD},0.12)`,
-                    }}
-                  />
-                ))}
-                {["22%", "78%"].map((top) => (
-                  <span
-                    key={top}
-                    className="absolute inset-x-0 h-[3px] -translate-y-1/2"
-                    style={{
-                      top,
-                      borderTop: `1px solid rgba(${GOLD},0.7)`,
-                      borderBottom: `1px solid rgba(${GOLD},0.7)`,
-                      background: `rgba(${GOLD},0.12)`,
-                    }}
-                  />
-                ))}
-                <span
-                  className="font-serif text-[19px] font-semibold tracking-[0.18em] whitespace-nowrap uppercase"
-                  style={{
-                    writingMode: "vertical-rl",
-                    color: GOLD_TEXT,
-                    textShadow: "0 2px 6px rgba(0,0,0,0.8)",
-                  }}
-                >
-                  {title}
-                </span>
-              </motion.div>
+							{/* spine: rounded like a real binding */}
+							<motion.div
+								className="sb-lt pointer-events-auto absolute top-0 flex items-center justify-center overflow-hidden"
+								initial={false}
+								animate={faceFade}
+								transition={faceT}
+								style={{
+									rotateY: -90,
+									left: PAGE_W - THICK / 2,
+									width: THICK,
+									height: PAGE_H,
+									backgroundImage: `linear-gradient(90deg, rgba(0,0,0,0.65), rgb(${base}) 16%, rgba(${accent},0.22) 42%, rgba(255,255,255,0.05) 50%, rgb(${base}) 66%, rgba(0,0,0,0.7))`,
+									boxShadow: "inset 0 0 14px rgba(0,0,0,0.5)",
+								}}
+							>
+								{(
+									[
+										["7%", 9],
+										["93%", 9],
+										["22%", 3],
+										["78%", 3],
+									] as const
+								).map(([top, height]) => (
+									<span key={top} className="absolute inset-x-0 -translate-y-1/2" style={{ ...BAND, top, height }} />
+								))}
+								<span
+									className="font-serif text-[19px] font-semibold tracking-[0.18em] whitespace-nowrap uppercase"
+									style={{ writingMode: "vertical-rl", color: GOLD_TEXT, textShadow: "0 2px 6px rgba(0,0,0,0.8)" }}
+								>
+									{title}
+								</span>
+							</motion.div>
 
-              {/* page edges: top + bottom (layered paper, built with pseudo-elements) */}
-              {[-THICK / 2, PAGE_H - THICK / 2].map((top) => (
-                <motion.div
-                  key={top}
-                  className="sb-edge absolute"
-                  initial={false}
-                  animate={faceFade}
-                  transition={faceT}
-                  style={{
-                    ...edgeVars("0deg", base),
-                    rotateX: 90,
-                    top,
-                    left: PAGE_W + 6,
-                    width: PAGE_W - 12,
-                    height: THICK - 8,
-                  }}
-                />
-              ))}
+							{/* page edges: top + bottom (layered paper, built with pseudo-elements) */}
+							{[-THICK / 2, PAGE_H - THICK / 2].map((top) => (
+								<motion.div
+									key={top}
+									className="sb-edge absolute"
+									initial={false}
+									animate={faceFade}
+									transition={faceT}
+									style={{
+										...edgeVars("0deg", base),
+										rotateX: 90,
+										top,
+										left: PAGE_W + 6,
+										width: PAGE_W - 12,
+										height: THICK - 8,
+									}}
+								/>
+							))}
 
-              {/* page edges: right */}
-              <motion.div
-                className="sb-edge absolute"
-                initial={false}
-                animate={faceFade}
-                transition={faceT}
-                style={{
-                  ...edgeVars("90deg", base),
-                  rotateY: 90,
-                  top: 6,
-                  left: PAGE_W * 2 - THICK / 2 + 4,
-                  width: THICK - 8,
-                  height: PAGE_H - 12,
-                }}
-              />
+							{/* page edges: right */}
+							<motion.div
+								className="sb-edge absolute"
+								initial={false}
+								animate={faceFade}
+								transition={faceT}
+								style={{
+									...edgeVars("90deg", base),
+									rotateY: 90,
+									top: 6,
+									left: PAGE_W * 2 - THICK / 2 + 4,
+									width: THICK - 8,
+									height: PAGE_H - 12,
+								}}
+							/>
 
-              {show && (
-                <>
-                  {/* right page (paper, 3 scrollable pages) - sits under the cover and is revealed as it swings open */}
-                  <motion.div
-                    ref={pageRef}
-                    className="absolute top-0"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.2, delay: open ? 0 : 0.95 }}
-                    style={{
-                      left: PAGE_W,
-                      width: PAGE_W,
-                      height: PAGE_H,
-                      pointerEvents: open ? "auto" : "none",
-                    }}
-                  >
-                    <RightPage service={service} index={index} open={open} onClose={onClose} />
-                  </motion.div>
+							{show && (
+								<>
+									{/* right page (3 scrollable pages): sits under the cover and is revealed as it swings open */}
+									<motion.div
+										ref={pageRef}
+										className="absolute top-0"
+										initial={false}
+										animate={{ opacity: open ? 1 : 0 }}
+										transition={{ duration: 0.2, delay: open ? 0 : 0.95 }}
+										style={{ left: PAGE_W, width: PAGE_W, height: PAGE_H, pointerEvents: open ? "auto" : "none" }}
+									>
+										<RightPage service={service} index={index} open={open} onClose={onClose} />
+									</motion.div>
 
-                  {/* the fold: both pages curve down into the centre of the spread */}
-                  <motion.div
-                    aria-hidden
-                    className="pointer-events-none absolute top-0"
-                    initial={false}
-                    animate={{ opacity: open ? 1 : 0 }}
-                    transition={{ duration: 0.5, delay: open ? 0.55 : 0 }}
-                    style={{
-                      z: 3,
-                      left: PAGE_W - 46,
-                      width: 92,
-                      height: PAGE_H,
-                      background:
-                        "linear-gradient(90deg, transparent, rgba(25,14,3,0.22) 38%, rgba(15,8,0,0.42) 50%, rgba(25,14,3,0.22) 62%, transparent)",
-                    }}
-                  />
-                </>
-              )}
+									{/* the fold: both pages curve down into the centre of the spread */}
+									<motion.div
+										aria-hidden
+										className="pointer-events-none absolute top-0"
+										initial={false}
+										animate={{ opacity: open ? 1 : 0 }}
+										transition={{ duration: 0.5, delay: open ? 0.55 : 0 }}
+										style={{
+											z: 3,
+											left: PAGE_W - 46,
+											width: 92,
+											height: PAGE_H,
+											background:
+												"linear-gradient(90deg, transparent, rgba(25,14,3,0.22) 38%, rgba(15,8,0,0.42) 50%, rgba(25,14,3,0.22) 62%, transparent)",
+										}}
+									/>
+								</>
+							)}
 
-              {/* the cover: front = cover art, back = inside of the cover; swings around the spine */}
-              <motion.div
-                className="pointer-events-auto absolute top-0"
-                initial={false}
-                animate={{ rotateY: open ? -180 : 0, z: open ? 2 : THICK / 2 }}
-                transition={{ duration: dur, ease: COVER_EASE, delay }}
-                style={{
-                  left: PAGE_W,
-                  width: PAGE_W,
-                  height: PAGE_H,
-                  transformOrigin: "left center",
-                  transformStyle: "preserve-3d",
-                }}
-              >
-                {/* front face: tiny z offsets keep the two faces from ever fighting or showing through */}
-                <div
-                  className="absolute inset-0"
-                  style={{ ...hidden, transform: "translateZ(0.5px)" }}
-                >
-                  <BookCover service={service} index={index} hint />
-                  {/* the cover darkens as it turns away from the light */}
-                  <motion.div
-                    aria-hidden
-                    className="pointer-events-none absolute inset-0"
-                    initial={false}
-                    animate={{ opacity: open ? 0.55 : 0 }}
-                    transition={{
-                      duration: half,
-                      ease: "linear",
-                      delay: open ? delay : delay + half,
-                    }}
-                    style={{ background: "#05080f" }}
-                  />
-                </div>
-                <div
-                  className="absolute inset-0"
-                  style={{ ...hidden, transform: "rotateY(180deg) translateZ(0.5px)" }}
-                >
-                  {show && <LeftPage service={service} index={index} />}
-                  <motion.div
-                    aria-hidden
-                    className="pointer-events-none absolute inset-0"
-                    initial={false}
-                    animate={{ opacity: open ? 0 : 0.55 }}
-                    transition={{
-                      duration: half,
-                      ease: "linear",
-                      delay: open ? delay + half : delay,
-                    }}
-                    style={{ background: "#05080f" }}
-                  />
-                </div>
-              </motion.div>
-            </motion.div>
-          </div>
-        </motion.div>
-      </div>
-    </div>
-  );
-};
-
-const BookCard3D = memo(BookCard3DBase);
+							{/* the cover: front = cover art, back = inside of the cover; swings around the spine */}
+							<motion.div
+								className="pointer-events-auto absolute top-0"
+								initial={false}
+								animate={{ rotateY: open ? -180 : 0, z: open ? 2 : THICK / 2 }}
+								transition={{ duration: dur, ease: COVER_EASE, delay }}
+								style={{
+									left: PAGE_W,
+									width: PAGE_W,
+									height: PAGE_H,
+									transformOrigin: "left center",
+									transformStyle: "preserve-3d",
+								}}
+							>
+								{/* tiny z offsets keep the two faces from fighting or showing through */}
+								<div className="absolute inset-0" style={{ ...hidden, transform: "translateZ(0.5px)" }}>
+									<BookCover service={service} index={index} hint />
+									{/* the cover darkens as it turns away from the light */}
+									<motion.div
+										aria-hidden
+										className="pointer-events-none absolute inset-0"
+										initial={false}
+										animate={{ opacity: open ? 0.55 : 0 }}
+										transition={{ duration: half, ease: "linear", delay: open ? delay : delay + half }}
+										style={{ background: "#05080f" }}
+									/>
+								</div>
+								<div className="absolute inset-0" style={{ ...hidden, transform: "rotateY(180deg) translateZ(0.5px)" }}>
+									{show && <LeftPage service={service} index={index} />}
+									<motion.div
+										aria-hidden
+										className="pointer-events-none absolute inset-0"
+										initial={false}
+										animate={{ opacity: open ? 0 : 0.55 }}
+										transition={{ duration: half, ease: "linear", delay: open ? delay + half : delay }}
+										style={{ background: "#05080f" }}
+									/>
+								</div>
+							</motion.div>
+						</motion.div>
+					</div>
+				</motion.div>
+			</div>
+		</div>
+	)
+})
 
 /* ---------------- SIMPLE path: flat cover (phones, touch screens, weak devices) ---------------- */
-// One static, scaled cover. No preserve-3d, no perspective, no springs, no hover scale.
-// A tap (pointer barely moved) opens the details sheet; a drag just moves the book.
+// One static, scaled cover. A tap opens the details sheet; a drag just moves the book.
 
 const FlatCard = ({
-  service,
-  index,
-  scale,
-  onOpen,
+	service,
+	index,
+	scale,
+	onOpen,
 }: {
-  service: Service;
-  index: number;
-  scale: number;
-  onOpen: (index: number) => void;
+	service: Service
+	index: number
+	scale: number
+	onOpen: (index: number) => void
 }) => {
-  const down = useRef<{ x: number; y: number } | null>(null);
+	const tap = useTap(() => onOpen(index), 8)
 
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-label={`Open ${service.title}`}
-      className="relative h-full w-full cursor-pointer overflow-hidden rounded-md outline-none select-none focus-visible:ring-2 focus-visible:ring-[#e8c476]/80"
-      // one cheap static shadow (no filters)
-      style={{ boxShadow: "0 10px 22px rgba(0,0,0,0.55), 0 0 0 1px rgba(232,196,118,0.22)" }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen(index);
-        }
-      }}
-      onPointerDown={(e) => {
-        down.current = { x: e.clientX, y: e.clientY };
-      }}
-      onPointerCancel={() => {
-        down.current = null;
-      }}
-      onPointerUp={(e) => {
-        const d = down.current;
-        down.current = null;
-        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 8) onOpen(index);
-      }}
-    >
-      <div
-        style={{
-          width: PAGE_W,
-          height: PAGE_H,
-          transform: `scale(${scale})`,
-          transformOrigin: "top left",
-        }}
-      >
-        <BookCover service={service} index={index} mini />
-      </div>
-    </div>
-  );
-};
+	return (
+		<div
+			role="button"
+			tabIndex={0}
+			aria-label={`Open ${service.title}`}
+			className="relative h-full w-full cursor-pointer overflow-hidden rounded-md outline-none select-none focus-visible:ring-2 focus-visible:ring-[#e8c476]/80"
+			// one cheap static shadow (no filters)
+			style={{ boxShadow: "0 10px 22px rgba(0,0,0,0.55), 0 0 0 1px rgba(232,196,118,0.22)" }}
+			onKeyDown={activate(() => onOpen(index))}
+			{...tap}
+		>
+			<div style={{ width: PAGE_W, height: PAGE_H, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+				<BookCover service={service} index={index} mini />
+			</div>
+		</div>
+	)
+}
 
-type CardProps = BookProps & { simple: boolean; cardW: number };
+type CardProps = BookProps & { simple: boolean; cardW: number }
 
 // memoized: opening / dragging one book doesn't re-render the other six
 const ServiceCard = memo(function ServiceCard({ simple, cardW, ...rest }: CardProps) {
-  return simple ? (
-    <FlatCard service={rest.service} index={rest.index} scale={cardW / PAGE_W} onOpen={rest.onOpen} />
-  ) : (
-    <BookCard3D {...rest} />
-  );
-});
+	return simple ? (
+		<FlatCard service={rest.service} index={rest.index} scale={cardW / PAGE_W} onOpen={rest.onOpen} />
+	) : (
+		<BookCard3D {...rest} />
+	)
+})
 
 /* ---------------- Details sheet (phones, tablets, small windows, weak devices) ---------------- */
-// Native-size, single-column, scrollable. Real 15-16px text and 44px+ tap targets,
-// no scaling of a 420px page, no blur, no heavy shadows. Rendered in a portal so no parent
-// transform / containment can break `position: fixed`.
+// Native-size, single-column, scrollable: real 15-16px text and 44px+ tap targets, no blur, no heavy shadows.
+// Rendered in a portal so no parent transform / containment can break `position: fixed`.
 
 const SHEET_CSS = `
   @keyframes sb-sheet-in {
@@ -1823,806 +1595,741 @@ const SHEET_CSS = `
   }
   .sb-sheet { animation: sb-sheet-in 0.22s ease-out both; }
   @media (prefers-reduced-motion: reduce) { .sb-sheet { animation: none; } }
-`;
+`
 
-const ServiceSheet = ({
-  service,
-  index,
-  onClose,
-}: {
-  service: Service;
-  index: number;
-  onClose: () => void;
-}) => {
-  const { title, desc, script, accent, base, image, features, about, steps, faqs } = service;
-  const dark = shade(accent, 0.55);
-  const btnTop = shade(accent, 0.74);
-  const [imgFailed, setImgFailed] = useState(false);
-  const showImage = !!image && !imgFailed;
-  const closeRef = useRef<HTMLButtonElement>(null);
+const ServiceSheet = ({ service, index, onClose }: { service: Service; index: number; onClose: () => void }) => {
+	const { title, desc, script, accent, base, image, features, about, steps, faqs } = service
+	const dark = shade(accent, 0.55)
+	const btnTop = shade(accent, 0.74)
+	const [showImage, onError] = useImage(image)
+	const closeRef = useRef<HTMLButtonElement>(null)
 
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    const prevFocus = document.activeElement as HTMLElement | null;
-    document.body.style.overflow = "hidden"; // lock page scroll behind the sheet
-    closeRef.current?.focus({ preventScroll: true });
-    return () => {
-      document.body.style.overflow = prevOverflow;
-      prevFocus?.focus?.({ preventScroll: true });
-    };
-  }, []);
+	useEffect(() => {
+		const prevOverflow = document.body.style.overflow
+		const prevFocus = document.activeElement as HTMLElement | null
+		document.body.style.overflow = "hidden" // lock page scroll behind the sheet
+		closeRef.current?.focus({ preventScroll: true })
+		return () => {
+			document.body.style.overflow = prevOverflow
+			prevFocus?.focus?.({ preventScroll: true })
+		}
+	}, [])
 
-  const stamp = {
-    color: `rgb(${dark})`,
-    border: `1.5px solid rgba(${dark},0.7)`,
-    background: `rgba(${accent},0.16)`,
-  } as const;
+	const stamp = {
+		color: `rgb(${dark})`,
+		border: `1.5px solid rgba(${dark},0.7)`,
+		background: `rgba(${accent},0.16)`,
+	} as const
 
-  if (typeof document === "undefined") return null;
+	return createPortal(
+		<div
+			role="dialog"
+			aria-modal="true"
+			aria-label={title}
+			// plain dark overlay: backdrop-blur is very expensive on mid-range phones
+			className="fixed inset-0 z-[1000] overflow-y-auto overscroll-contain bg-black/85"
+			onClick={onClose}
+		>
+			<style>{SHEET_CSS}</style>
+			<div
+				className="sb-sheet relative mx-auto min-h-full w-full max-w-xl sm:my-8 sm:min-h-0 sm:rounded-2xl"
+				style={{ background: "#f1e7c9", color: INK, fontFamily: BOOK_FONT }}
+				onClick={(e) => e.stopPropagation()}
+			>
+				{/* close button: stays visible while the sheet scrolls */}
+				<div className="sticky top-0 z-10 h-0">
+					<button
+						ref={closeRef}
+						type="button"
+						onClick={onClose}
+						aria-label="Close"
+						className="absolute right-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-[26px] leading-none text-white"
+						style={{ top: "calc(env(safe-area-inset-top, 0px) + 12px)" }}
+					>
+						×
+					</button>
+				</div>
 
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      // plain dark overlay: backdrop-blur is very expensive on mid-range phones
-      className="fixed inset-0 z-[1000] overflow-y-auto overscroll-contain bg-black/85"
-      onClick={onClose}
-    >
-      <style>{SHEET_CSS}</style>
-      <div
-        className="sb-sheet relative mx-auto min-h-full w-full max-w-xl sm:my-8 sm:min-h-0 sm:rounded-2xl"
-        style={{ background: "#f1e7c9", color: INK, fontFamily: BOOK_FONT }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* close button: stays visible while the sheet scrolls */}
-        <div className="sticky top-0 z-10 h-0">
-          <button
-            ref={closeRef}
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="absolute right-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-[26px] leading-none text-white"
-            style={{ top: "calc(env(safe-area-inset-top, 0px) + 12px)" }}
-          >
-            ×
-          </button>
-        </div>
+				<header
+					className="relative overflow-hidden px-5 pt-16 pb-6 sm:rounded-t-2xl"
+					style={{
+						background: `radial-gradient(circle at 70% 30%, rgba(${accent},0.45), transparent 60%), linear-gradient(160deg, rgb(${base}), #02040f)`,
+						paddingTop: "calc(env(safe-area-inset-top, 0px) + 64px)",
+					}}
+				>
+					{showImage && (
+						<img
+							src={image}
+							alt=""
+							draggable={false}
+							decoding="async"
+							onError={onError}
+							className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-45"
+						/>
+					)}
+					<div
+						aria-hidden
+						className="pointer-events-none absolute inset-0"
+						style={{ background: `linear-gradient(to bottom, rgba(${base},0.55), rgba(${base},0.9))` }}
+					/>
+					<div className="relative">
+						<span className="font-serif text-[13px] tracking-[0.3em]" style={{ color: `rgb(${GOLD})` }}>
+							{String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
+						</span>
+						<h3
+							className="mt-2 font-serif text-[32px] leading-[1.1] font-semibold"
+							style={{ color: GOLD_TEXT, textShadow: "0 2px 10px rgba(0,0,0,0.7)" }}
+						>
+							{title}
+						</h3>
+						<p className="mt-3 max-w-md text-[16px] leading-relaxed text-white/90">{desc}</p>
+						<span className="mt-4 block text-[24px] leading-none text-white italic" style={{ fontFamily: SCRIPT_FONT }}>
+							{script}
+						</span>
+					</div>
+				</header>
 
-        {/* hero */}
-        <header
-          className="relative overflow-hidden px-5 pt-16 pb-6 sm:rounded-t-2xl"
-          style={{
-            background: `radial-gradient(circle at 70% 30%, rgba(${accent},0.45), transparent 60%), linear-gradient(160deg, rgb(${base}), #02040f)`,
-            paddingTop: "calc(env(safe-area-inset-top, 0px) + 64px)",
-          }}
-        >
-          {showImage && (
-            <img
-              src={image}
-              alt=""
-              draggable={false}
-              decoding="async"
-              onError={() => setImgFailed(true)}
-              className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-45"
-            />
-          )}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0"
-            style={{
-              background: `linear-gradient(to bottom, rgba(${base},0.55), rgba(${base},0.9))`,
-            }}
-          />
-          <div className="relative">
-            <span className="font-serif text-[13px] tracking-[0.3em]" style={{ color: `rgb(${GOLD})` }}>
-              {String(index + 1).padStart(2, "0")} / {String(SERVICES.length).padStart(2, "0")}
-            </span>
-            <h3
-              className="mt-2 font-serif text-[32px] leading-[1.1] font-semibold"
-              style={{ color: GOLD_TEXT, textShadow: "0 2px 10px rgba(0,0,0,0.7)" }}
-            >
-              {title}
-            </h3>
-            <p className="mt-3 max-w-md text-[16px] leading-relaxed text-white/90">{desc}</p>
-            <span
-              className="mt-4 block text-[24px] leading-none text-white italic"
-              style={{ fontFamily: SCRIPT_FONT }}
-            >
-              {script}
-            </span>
-          </div>
-        </header>
+				<div
+					className="flex flex-col gap-8 px-5 pt-7"
+					style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 28px)" }}
+				>
+					<section>
+						<Head n={0} />
+						<ul className="mt-2">
+							{features.map((f, i) => (
+								<li
+									key={f.title}
+									className="flex items-center gap-4 py-3"
+									style={i ? { borderTop: "1px solid rgba(90,65,25,0.2)" } : undefined}
+								>
+									<div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full" style={stamp}>
+										{f.icon}
+									</div>
+									<div>
+										<div className="text-[16px] leading-tight font-semibold">{f.title}</div>
+										<div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
+											{f.desc}
+										</div>
+									</div>
+								</li>
+							))}
+						</ul>
+					</section>
 
-        {/* content */}
-        <div
-          className="flex flex-col gap-8 px-5 pt-7"
-          style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 28px)" }}
-        >
-          <section>
-            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[0]}</h4>
-            <Flourish className="mt-3 w-40" />
-            <ul className="mt-2">
-              {features.map((f, i) => (
-                <li
-                  key={f.title}
-                  className="flex items-center gap-4 py-3"
-                  style={i ? { borderTop: "1px solid rgba(90,65,25,0.2)" } : undefined}
-                >
-                  <div
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
-                    style={stamp}
-                  >
-                    {f.icon}
-                  </div>
-                  <div>
-                    <div className="text-[16px] leading-tight font-semibold">{f.title}</div>
-                    <div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
-                      {f.desc}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
+					<section>
+						<Head n={1} />
+						<p className="mt-3 text-[15px] leading-relaxed italic" style={{ color: INK_SOFT }}>
+							{about}
+						</p>
+						<ol className="mt-3 flex flex-col gap-4">
+							{steps.map(([t, d], i) => (
+								<li key={t} className="flex items-start gap-3">
+									<span
+										className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[16px] font-semibold"
+										style={stamp}
+									>
+										{i + 1}
+									</span>
+									<div>
+										<div className="text-[16px] leading-tight font-semibold">{t}</div>
+										<div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
+											{d}
+										</div>
+									</div>
+								</li>
+							))}
+						</ol>
+					</section>
 
-          <section>
-            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[1]}</h4>
-            <Flourish className="mt-3 w-40" />
-            <p className="mt-3 text-[15px] leading-relaxed italic" style={{ color: INK_SOFT }}>
-              {about}
-            </p>
-            <ol className="mt-3 flex flex-col gap-4">
-              {steps.map(([t, d], i) => (
-                <li key={t} className="flex items-start gap-3">
-                  <span
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[16px] font-semibold"
-                    style={stamp}
-                  >
-                    {i + 1}
-                  </span>
-                  <div>
-                    <div className="text-[16px] leading-tight font-semibold">{t}</div>
-                    <div className="mt-0.5 text-[14px] leading-snug italic" style={{ color: INK_SOFT }}>
-                      {d}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </section>
+					<section>
+						<Head n={2} />
+						<div className="mt-4 flex flex-col gap-5">
+							{faqs.map(([q, a]) => (
+								<div key={q}>
+									<h5 className="text-[16px] leading-tight font-semibold">{q}</h5>
+									<p className="mt-1 text-[14px] leading-relaxed italic" style={{ color: INK_SOFT }}>
+										{a}
+									</p>
+								</div>
+							))}
+						</div>
+					</section>
 
-          <section>
-            <h4 className="text-[26px] leading-none font-normal italic">{PAGE_TITLES[2]}</h4>
-            <Flourish className="mt-3 w-40" />
-            <div className="mt-4 flex flex-col gap-5">
-              {faqs.map(([q, a]) => (
-                <div key={q}>
-                  <h5 className="text-[16px] leading-tight font-semibold">{q}</h5>
-                  <p className="mt-1 text-[14px] leading-relaxed italic" style={{ color: INK_SOFT }}>
-                    {a}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </section>
+					<a
+						href="#contact"
+						onClick={onClose}
+						className="flex min-h-12 items-center justify-center gap-2 rounded-md px-5 py-3 text-[15px] font-semibold tracking-[0.18em] uppercase"
+						style={{
+							color: "#fff6dc",
+							textShadow: "0 1px 1px rgba(0,0,0,0.45)",
+							background: `linear-gradient(180deg, rgb(${btnTop}), rgb(${shade(accent, 0.5)}))`,
+							boxShadow: "inset 0 0 0 1px rgba(255,236,190,0.5)",
+						}}
+					>
+						Get Started <span aria-hidden>→</span>
+					</a>
+				</div>
+			</div>
+		</div>,
+		document.body
+	)
+}
 
-          <a
-            href="#contact"
-            onClick={onClose}
-            className="flex min-h-12 items-center justify-center gap-2 rounded-md px-5 py-3 text-[15px] font-semibold tracking-[0.18em] uppercase"
-            style={{
-              color: "#fff6dc",
-              textShadow: "0 1px 1px rgba(0,0,0,0.45)",
-              background: `linear-gradient(180deg, rgb(${btnTop}), rgb(${shade(accent, 0.5)}))`,
-              boxShadow: "inset 0 0 0 1px rgba(255,236,190,0.5)",
-            }}
-          >
-            Get Started <span aria-hidden>→</span>
-          </a>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-};
-
-/* ---------------- Services + layout ---------------- */
+/* ---------------- Services data ---------------- */
 
 // Put your images in /public/services/ and they show up on the cover and the left page.
 // Until the file exists, a placeholder is shown.
-// Tip: use .webp / .avif at ~840x1120 (2x of 420x560), under ~80 KB each. (Smaller files = the biggest mobile speed win.)
-// `base` values are the original ones multiplied by ~0.78 (a little darker).
-// Each book has 3 pages: features (page 1), about + steps (page 2), FAQ (page 3).
+// Tip: .webp / .avif at ~840x1120 (2x of 420x560), under ~80 KB each, is the biggest mobile speed win.
+// Each book has 3 pages: features (1), about + steps (2), FAQ (3).
 const SERVICES: Service[] = [
-  {
-    title: "Web Development",
-    desc: "Custom websites & web applications built to grow your business.",
-    tagline: "Build · Develop · Grow",
-    script: "Ideas into Reality",
-    icon: <CodeIcon />,
-    accent: "70,130,255",
-    base: "9,24,72",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <CodeIcon />, title: "Custom Development", desc: "Fast, scalable and modern websites built for your goals." },
-      { icon: <DevicesIcon />, title: "Responsive Design", desc: "Looks perfect on every device." },
-      { icon: <BoltIcon />, title: "Performance Focused", desc: "Optimized for speed and better user experience." },
-      { icon: <HeadsetIcon />, title: "Ongoing Support", desc: "We're here even after launch." },
-    ],
-    about: "We design and code fast, secure websites and web apps in Next.js and React, so your business looks sharp and loads quickly on every device.",
-    steps: [
-      ["Discover", "We learn your goals, audience and budget."],
-      ["Design & Build", "Clean design, then responsive, SEO-ready code."],
-      ["Launch & Support", "Testing, go-live and help afterwards."],
-    ],
-    faqs: [
-      ["How long does a website take?", "Most business sites launch in two to six weeks, depending on the pages and features."],
-      ["Will my site rank on Google?", "Every site ships with clean markup, fast loading and on-page SEO basics."],
-    ],
-    className: "rotate-[-5deg]",
-  },
-  {
-    title: "Web Redesign",
-    desc: "Fresh, modern makeovers that turn outdated sites into lead machines.",
-    tagline: "Modern · Engaging · Convert",
-    script: "Old to Outstanding",
-    icon: <LayoutIcon />,
-    accent: "160,100,255",
-    base: "34,14,70",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <LayoutIcon />, title: "Fresh Modern Look", desc: "A new design that matches your brand today." },
-      { icon: <DevicesIcon />, title: "Better User Experience", desc: "Cleaner layouts and easier navigation." },
-      { icon: <ChartIcon />, title: "Conversion Focused", desc: "Built to turn visitors into enquiries." },
-      { icon: <BoltIcon />, title: "Faster & Mobile-Ready", desc: "Quicker load times on every screen." },
-    ],
-    about: "Already have a site that feels dated or slow? We rebuild the look, structure and speed while keeping the content and rankings that already work.",
-    steps: [
-      ["Audit", "We review design, speed, SEO and analytics."],
-      ["Redesign", "A new layout and visuals that match your brand."],
-      ["Migrate & Launch", "Redirects keep your existing rankings safe."],
-    ],
-    faqs: [
-      ["Will I lose my Google rankings?", "No. We map every old URL to the new one with proper redirects."],
-      ["Can you keep my existing content?", "Yes. We reuse what performs well and rewrite what doesn't."],
-    ],
-    className: "rotate-[-7deg]",
-  },
-  {
-    title: "Web Maintenance",
-    desc: "Updates, backups, security and speed fixes so your site never slows down.",
-    tagline: "Secure · Update · Optimize",
-    script: "Always Running Smooth",
-    icon: <WrenchIcon />,
-    accent: "40,185,125",
-    base: "8,48,34",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <WrenchIcon />, title: "Regular Updates", desc: "Core, plugins and dependencies kept current." },
-      { icon: <ShieldIcon />, title: "Security Monitoring", desc: "Threats caught and fixed before they hurt." },
-      { icon: <CheckIcon />, title: "Backups & Recovery", desc: "Restore quickly if anything goes wrong." },
-      { icon: <BoltIcon />, title: "Speed Fixes", desc: "Ongoing performance tuning." },
-    ],
-    about: "A neglected website gets slow and vulnerable. We keep yours updated, backed up and fast with a simple monthly care plan.",
-    steps: [
-      ["Health Check", "We scan security, speed and broken links."],
-      ["Monthly Care", "Updates, backups and uptime monitoring."],
-      ["Report", "A short monthly summary of what we fixed."],
-    ],
-    faqs: [
-      ["What if my site gets hacked?", "We restore a clean backup and close the security gap."],
-      ["Do you maintain sites you didn't build?", "Yes, on most platforms after a quick review."],
-    ],
-    className: "rotate-[8deg]",
-  },
-  {
-    title: "SEO Optimization",
-    desc: "Rank higher on Google and bring in steady organic traffic.",
-    tagline: "Rank · Traffic · Visibility",
-    script: "Be Found First",
-    icon: <SearchIcon />,
-    accent: "245,170,50",
-    base: "58,34,5",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <SearchIcon />, title: "On-Page SEO", desc: "Titles, content and structure that rank." },
-      { icon: <CodeIcon />, title: "Technical SEO", desc: "Speed, indexing and clean site structure." },
-      { icon: <LayoutIcon />, title: "Content Strategy", desc: "Pages built around what people search for." },
-      { icon: <ChartIcon />, title: "Reports & Tracking", desc: "Clear monthly progress you can see." },
-    ],
-    about: "We improve your site's technical health, content and authority so the right customers find you on Google every month.",
-    steps: [
-      ["Audit & Keywords", "Find what customers search and where you stand."],
-      ["Optimize", "Fix technical issues and improve key pages."],
-      ["Grow & Report", "Build content and links, then track results."],
-    ],
-    faqs: [
-      ["How long does SEO take?", "Early gains often show in two to three months; stronger results build over six."],
-      ["Do you guarantee the number one spot?", "No honest agency can. We commit to clear work and visible progress."],
-    ],
-    className: "rotate-[10deg]",
-  },
-  {
-    title: "Google Ads",
-    desc: "High-intent search campaigns that get you calls and enquiries.",
-    tagline: "Target · Clicks · Results",
-    script: "Right People, Right Time",
-    icon: <TargetIcon />,
-    accent: "235,70,80",
-    base: "60,12,20",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <TargetIcon />, title: "Search Campaigns", desc: "Show up when customers are ready to buy." },
-      { icon: <MegaphoneIcon />, title: "Display & Remarketing", desc: "Bring past visitors back to your site." },
-      { icon: <ChartIcon />, title: "Conversion Tracking", desc: "Know exactly what each click delivers." },
-      { icon: <BoltIcon />, title: "Budget Optimization", desc: "More results from every rupee spent." },
-    ],
-    about: "We run search campaigns aimed at people ready to call or buy, and track every click so your budget goes where it pays back.",
-    steps: [
-      ["Plan", "Keywords, budget and target locations."],
-      ["Launch", "Ads, landing pages and conversion tracking."],
-      ["Optimize", "Weekly tweaks to lower your cost per lead."],
-    ],
-    faqs: [
-      ["What budget do I need?", "Many local businesses start with a modest monthly spend and scale as leads arrive."],
-      ["When will I see leads?", "Usually within days of launch, improving as we optimize."],
-    ],
-    className: "rotate-[2deg]",
-  },
-  {
-    title: "Meta Ads",
-    desc: "Facebook and Instagram campaigns that reach the right audience.",
-    tagline: "Reach · Engage · Convert",
-    script: "Stop the Scroll",
-    icon: <MegaphoneIcon />,
-    accent: "225,85,155",
-    base: "58,13,44",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <MegaphoneIcon />, title: "Facebook & Instagram", desc: "Campaigns across both platforms." },
-      { icon: <TargetIcon />, title: "Audience Targeting", desc: "Reach people who actually match your customer." },
-      { icon: <LayoutIcon />, title: "Creative Design", desc: "Scroll-stopping visuals and ad copy." },
-      { icon: <ChartIcon />, title: "Lead Generation", desc: "Enquiries delivered straight to you." },
-    ],
-    about: "We build Facebook and Instagram campaigns with eye-catching creative and sharp audiences to bring you enquiries, not just likes.",
-    steps: [
-      ["Strategy", "Define the audience and the offer."],
-      ["Create", "Design the visuals and write the ad copy."],
-      ["Test & Scale", "Keep the winners, pause what doesn't work."],
-    ],
-    faqs: [
-      ["Do you make the ad creatives?", "Yes. Images, short videos and copy are included."],
-      ["Can ads send leads to WhatsApp?", "Yes. Lead forms and click-to-WhatsApp ads are both supported."],
-    ],
-    className: "rotate-[-7deg]",
-  },
-  {
-    title: "Google Business Profile",
-    desc: "Dominate local search and Maps with an optimized listing.",
-    tagline: "Local · Maps · Reviews",
-    script: "Win Your Neighbourhood",
-    icon: <PinIcon />,
-    accent: "30,200,210",
-    base: "6,50,58",
-    image: "/images/sample1.png",
-    features: [
-      { icon: <PinIcon />, title: "Profile Optimization", desc: "A complete, search-ready business listing." },
-      { icon: <SearchIcon />, title: "Local SEO", desc: "Rank in the map pack near you." },
-      { icon: <CheckIcon />, title: "Review Management", desc: "Collect and reply to reviews that build trust." },
-      { icon: <ChartIcon />, title: "Posts & Insights", desc: "Regular updates and performance reports." },
-    ],
-    about: "Most local customers search on Google Maps first. We optimize your listing so you show up near them, with reviews that build trust.",
-    steps: [
-      ["Set Up", "Claim and fully complete your profile."],
-      ["Optimize", "Categories, photos, services and local keywords."],
-      ["Maintain", "Regular posts and replies to every review."],
-    ],
-    faqs: [
-      ["Why does my profile need optimizing?", "A complete, active profile ranks higher in local map results."],
-      ["Can you help with a suspended profile?", "We can help prepare and submit a reinstatement request."],
-    ],
-    className: "rotate-[4deg]",
-  },
-];
+	{
+		title: "Web Development",
+		desc: "Custom websites & web applications built to grow your business.",
+		tagline: "Build · Develop · Grow",
+		script: "Ideas into Reality",
+		icon: <CodeIcon />,
+		accent: "70,130,255",
+		base: "9,24,72",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <CodeIcon />, title: "Custom Development", desc: "Fast, scalable and modern websites built for your goals." },
+			{ icon: <DevicesIcon />, title: "Responsive Design", desc: "Looks perfect on every device." },
+			{ icon: <BoltIcon />, title: "Performance Focused", desc: "Optimized for speed and better user experience." },
+			{ icon: <HeadsetIcon />, title: "Ongoing Support", desc: "We're here even after launch." },
+		],
+		about: "We design and code fast, secure websites and web apps in Next.js and React, so your business looks sharp and loads quickly on every device.",
+		steps: [
+			["Discover", "We learn your goals, audience and budget."],
+			["Design & Build", "Clean design, then responsive, SEO-ready code."],
+			["Launch & Support", "Testing, go-live and help afterwards."],
+		],
+		faqs: [
+			["How long does a website take?", "Most business sites launch in two to six weeks, depending on the pages and features."],
+			["Will my site rank on Google?", "Every site ships with clean markup, fast loading and on-page SEO basics."],
+		],
+		className: "rotate-[-5deg]",
+	},
+	{
+		title: "Web Redesign",
+		desc: "Fresh, modern makeovers that turn outdated sites into lead machines.",
+		tagline: "Modern · Engaging · Convert",
+		script: "Old to Outstanding",
+		icon: <LayoutIcon />,
+		accent: "160,100,255",
+		base: "34,14,70",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <LayoutIcon />, title: "Fresh Modern Look", desc: "A new design that matches your brand today." },
+			{ icon: <DevicesIcon />, title: "Better User Experience", desc: "Cleaner layouts and easier navigation." },
+			{ icon: <ChartIcon />, title: "Conversion Focused", desc: "Built to turn visitors into enquiries." },
+			{ icon: <BoltIcon />, title: "Faster & Mobile-Ready", desc: "Quicker load times on every screen." },
+		],
+		about: "Already have a site that feels dated or slow? We rebuild the look, structure and speed while keeping the content and rankings that already work.",
+		steps: [
+			["Audit", "We review design, speed, SEO and analytics."],
+			["Redesign", "A new layout and visuals that match your brand."],
+			["Migrate & Launch", "Redirects keep your existing rankings safe."],
+		],
+		faqs: [
+			["Will I lose my Google rankings?", "No. We map every old URL to the new one with proper redirects."],
+			["Can you keep my existing content?", "Yes. We reuse what performs well and rewrite what doesn't."],
+		],
+		className: "rotate-[-7deg]",
+	},
+	{
+		title: "Web Maintenance",
+		desc: "Updates, backups, security and speed fixes so your site never slows down.",
+		tagline: "Secure · Update · Optimize",
+		script: "Always Running Smooth",
+		icon: <WrenchIcon />,
+		accent: "40,185,125",
+		base: "8,48,34",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <WrenchIcon />, title: "Regular Updates", desc: "Core, plugins and dependencies kept current." },
+			{ icon: <ShieldIcon />, title: "Security Monitoring", desc: "Threats caught and fixed before they hurt." },
+			{ icon: <CheckIcon />, title: "Backups & Recovery", desc: "Restore quickly if anything goes wrong." },
+			{ icon: <BoltIcon />, title: "Speed Fixes", desc: "Ongoing performance tuning." },
+		],
+		about: "A neglected website gets slow and vulnerable. We keep yours updated, backed up and fast with a simple monthly care plan.",
+		steps: [
+			["Health Check", "We scan security, speed and broken links."],
+			["Monthly Care", "Updates, backups and uptime monitoring."],
+			["Report", "A short monthly summary of what we fixed."],
+		],
+		faqs: [
+			["What if my site gets hacked?", "We restore a clean backup and close the security gap."],
+			["Do you maintain sites you didn't build?", "Yes, on most platforms after a quick review."],
+		],
+		className: "rotate-[8deg]",
+	},
+	{
+		title: "SEO Optimization",
+		desc: "Rank higher on Google and bring in steady organic traffic.",
+		tagline: "Rank · Traffic · Visibility",
+		script: "Be Found First",
+		icon: <SearchIcon />,
+		accent: "245,170,50",
+		base: "58,34,5",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <SearchIcon />, title: "On-Page SEO", desc: "Titles, content and structure that rank." },
+			{ icon: <CodeIcon />, title: "Technical SEO", desc: "Speed, indexing and clean site structure." },
+			{ icon: <LayoutIcon />, title: "Content Strategy", desc: "Pages built around what people search for." },
+			{ icon: <ChartIcon />, title: "Reports & Tracking", desc: "Clear monthly progress you can see." },
+		],
+		about: "We improve your site's technical health, content and authority so the right customers find you on Google every month.",
+		steps: [
+			["Audit & Keywords", "Find what customers search and where you stand."],
+			["Optimize", "Fix technical issues and improve key pages."],
+			["Grow & Report", "Build content and links, then track results."],
+		],
+		faqs: [
+			["How long does SEO take?", "Early gains often show in two to three months; stronger results build over six."],
+			["Do you guarantee the number one spot?", "No honest agency can. We commit to clear work and visible progress."],
+		],
+		className: "rotate-[10deg]",
+	},
+	{
+		title: "Google Ads",
+		desc: "High-intent search campaigns that get you calls and enquiries.",
+		tagline: "Target · Clicks · Results",
+		script: "Right People, Right Time",
+		icon: <TargetIcon />,
+		accent: "235,70,80",
+		base: "60,12,20",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <TargetIcon />, title: "Search Campaigns", desc: "Show up when customers are ready to buy." },
+			{ icon: <MegaphoneIcon />, title: "Display & Remarketing", desc: "Bring past visitors back to your site." },
+			{ icon: <ChartIcon />, title: "Conversion Tracking", desc: "Know exactly what each click delivers." },
+			{ icon: <BoltIcon />, title: "Budget Optimization", desc: "More results from every rupee spent." },
+		],
+		about: "We run search campaigns aimed at people ready to call or buy, and track every click so your budget goes where it pays back.",
+		steps: [
+			["Plan", "Keywords, budget and target locations."],
+			["Launch", "Ads, landing pages and conversion tracking."],
+			["Optimize", "Weekly tweaks to lower your cost per lead."],
+		],
+		faqs: [
+			["What budget do I need?", "Many local businesses start with a modest monthly spend and scale as leads arrive."],
+			["When will I see leads?", "Usually within days of launch, improving as we optimize."],
+		],
+		className: "rotate-[2deg]",
+	},
+	{
+		title: "Meta Ads",
+		desc: "Facebook and Instagram campaigns that reach the right audience.",
+		tagline: "Reach · Engage · Convert",
+		script: "Stop the Scroll",
+		icon: <MegaphoneIcon />,
+		accent: "225,85,155",
+		base: "58,13,44",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <MegaphoneIcon />, title: "Facebook & Instagram", desc: "Campaigns across both platforms." },
+			{ icon: <TargetIcon />, title: "Audience Targeting", desc: "Reach people who actually match your customer." },
+			{ icon: <LayoutIcon />, title: "Creative Design", desc: "Scroll-stopping visuals and ad copy." },
+			{ icon: <ChartIcon />, title: "Lead Generation", desc: "Enquiries delivered straight to you." },
+		],
+		about: "We build Facebook and Instagram campaigns with eye-catching creative and sharp audiences to bring you enquiries, not just likes.",
+		steps: [
+			["Strategy", "Define the audience and the offer."],
+			["Create", "Design the visuals and write the ad copy."],
+			["Test & Scale", "Keep the winners, pause what doesn't work."],
+		],
+		faqs: [
+			["Do you make the ad creatives?", "Yes. Images, short videos and copy are included."],
+			["Can ads send leads to WhatsApp?", "Yes. Lead forms and click-to-WhatsApp ads are both supported."],
+		],
+		className: "rotate-[-7deg]",
+	},
+	{
+		title: "Google Business Profile",
+		desc: "Dominate local search and Maps with an optimized listing.",
+		tagline: "Local · Maps · Reviews",
+		script: "Win Your Neighbourhood",
+		icon: <PinIcon />,
+		accent: "30,200,210",
+		base: "6,50,58",
+		image: "/images/sample1.png",
+		features: [
+			{ icon: <PinIcon />, title: "Profile Optimization", desc: "A complete, search-ready business listing." },
+			{ icon: <SearchIcon />, title: "Local SEO", desc: "Rank in the map pack near you." },
+			{ icon: <CheckIcon />, title: "Review Management", desc: "Collect and reply to reviews that build trust." },
+			{ icon: <ChartIcon />, title: "Posts & Insights", desc: "Regular updates and performance reports." },
+		],
+		about: "Most local customers search on Google Maps first. We optimize your listing so you show up near them, with reviews that build trust.",
+		steps: [
+			["Set Up", "Claim and fully complete your profile."],
+			["Optimize", "Categories, photos, services and local keywords."],
+			["Maintain", "Regular posts and replies to every review."],
+		],
+		faqs: [
+			["Why does my profile need optimizing?", "A complete, active profile ranks higher in local map results."],
+			["Can you help with a suspended profile?", "We can help prepare and submit a reinstatement request."],
+		],
+		className: "rotate-[4deg]",
+	},
+]
 
 /* ---------------- SEO: real text + structured data for crawlers and screen readers ---------------- */
-// The same copy users see in the books (all 3 pages of every book), always present in the HTML,
-// even while the books are closed and their pages aren't mounted.
-// The JSON is built ONCE at module load, not on every render.
+// The same copy users see in the books, always in the HTML even while the books are closed.
+// The JSON is built ONCE at module load.
 const SEO_JSON = JSON.stringify({
-  "@context": "https://schema.org",
-  "@graph": SERVICES.map((s) => ({
-    "@type": "Service",
-    name: s.title,
-    serviceType: s.title,
-    description: `${s.desc} ${s.about}`,
-    provider: { "@type": "Organization", name: "ShivayTech" },
-  })),
-}).replace(/</g, "\\u003c");
+	"@context": "https://schema.org",
+	"@graph": SERVICES.map((s) => ({
+		"@type": "Service",
+		name: s.title,
+		serviceType: s.title,
+		description: `${s.desc} ${s.about}`,
+		provider: { "@type": "Organization", name: "ShivayTech" },
+	})),
+}).replace(/</g, "\\u003c")
 
 const SeoContent = memo(function SeoContent() {
-  return (
-    <>
-      <div className="sr-only">
-        {SERVICES.map((s) => (
-          <article key={s.title}>
-            <h4>{s.title} details</h4>
-            <p>
-              {s.desc} {s.about}
-            </p>
-            <ul>
-              {s.features.map((f) => (
-                <li key={f.title}>
-                  <strong>{f.title}</strong>: {f.desc}
-                </li>
-              ))}
-            </ul>
-            <ol>
-              {s.steps.map(([t, d]) => (
-                <li key={t}>
-                  <strong>{t}</strong>: {d}
-                </li>
-              ))}
-            </ol>
-            {s.faqs.map(([q, a]) => (
-              <div key={q}>
-                <h5>{q}</h5>
-                <p>{a}</p>
-              </div>
-            ))}
-          </article>
-        ))}
-      </div>
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: SEO_JSON }}
-      />
-    </>
-  );
-});
+	return (
+		<>
+			<div className="sr-only">
+				{SERVICES.map((s) => (
+					<article key={s.title}>
+						<h4>{s.title} details</h4>
+						<p>
+							{s.desc} {s.about}
+						</p>
+						<ul>
+							{s.features.map((f) => (
+								<li key={f.title}>
+									<strong>{f.title}</strong>: {f.desc}
+								</li>
+							))}
+						</ul>
+						<ol>
+							{s.steps.map(([t, d]) => (
+								<li key={t}>
+									<strong>{t}</strong>: {d}
+								</li>
+							))}
+						</ol>
+						{s.faqs.map(([q, a]) => (
+							<div key={q}>
+								<h5>{q}</h5>
+								<p>{a}</p>
+							</div>
+						))}
+					</article>
+				))}
+			</div>
+			<script type="application/ld+json" dangerouslySetInnerHTML={{ __html: SEO_JSON }} />
+		</>
+	)
+})
 
-// Where each card rests in the pile on tablets / desktop, as a fraction (0..1) of the free room inside the section.
+/* ---------------- Layout ---------------- */
+
+// Where each card rests on tablets / desktop, as a fraction (0..1) of the free room inside the section.
 const SPOTS = [
-  { x: 0.22, y: 0.37 }, // 0 Web Development — upper-left
-  { x: 0.15, y: 0.66 }, // 1 Web Redesign — lower-left
-  { x: 0.79, y: 0.32 }, // 2 Web Maintenance — upper-right
-  { x: 0.83, y: 0.65 }, // 3 SEO Optimization — lower-right
-  { x: 0.43, y: 0.24 }, // 4 Google Ads — top orbit
-  { x: 0.5, y: 0.62 }, // 5 Meta Ads — bottom orbit
-  { x: 0.69, y: 0.43 }, // 6 Google Business Profile — right inner orbit
-];
+	{ x: 0.22, y: 0.37 }, // 0 Web Development: upper-left
+	{ x: 0.15, y: 0.66 }, // 1 Web Redesign: lower-left
+	{ x: 0.79, y: 0.32 }, // 2 Web Maintenance: upper-right
+	{ x: 0.83, y: 0.65 }, // 3 SEO Optimization: lower-right
+	{ x: 0.43, y: 0.24 }, // 4 Google Ads: top orbit
+	{ x: 0.5, y: 0.62 }, // 5 Meta Ads: bottom orbit
+	{ x: 0.69, y: 0.43 }, // 6 Google Business Profile: right inner orbit
+]
+
+const PHONE_HEADER = 220
+const PHONE_ROWS = Math.ceil(SERVICES.length / 2)
 
 function computeLayout(W: number) {
-  const narrow = W < 768;
-  // phones: card width is ~46% of the screen so two books always fit side by side.
-  // wider screens: full size from 1280px up, shrinking smoothly down to MIN_UNIT.
-  const unit = narrow
-    ? clamp((W * 0.46) / BASE_CARD_W, 0.45, 0.62)
-    : clamp(W / 1280, MIN_UNIT, 1);
-  const cardW = BASE_CARD_W * unit;
-  const cardH = BASE_CARD_H * unit;
-  const freeX = Math.max(0, W - cardW);
+	const narrow = W < 768
+	// phones: card width ~46% of the screen so two books fit side by side.
+	// wider: full size from 1280px up, shrinking smoothly down to MIN_UNIT.
+	const unit = narrow ? clamp((W * 0.46) / BASE_CARD_W, 0.45, 0.62) : clamp(W / 1280, MIN_UNIT, 1)
+	const cardW = BASE_CARD_W * unit
+	const cardH = BASE_CARD_H * unit
+	const freeX = Math.max(0, W - cardW)
 
-  let height: number;
-  let places: { left: number; top: number }[];
+	// phone: zig-zag grid below the heading, slight overlap so it still feels like a pile
+	const pitch = cardH * 0.82
+	const stagger = pitch * 0.2
+	const height = narrow ? Math.round(PHONE_HEADER + (PHONE_ROWS - 1) * pitch + cardH + 40) : Math.round(cardH * 3.28)
+	const freeY = Math.max(0, height - cardH)
 
-  if (narrow) {
-    // phone: a zig-zag grid below the heading. Every book is visible, reachable, and inside the section.
-    const headerH = 220;
-    const pitch = cardH * 0.82; // slight overlap so it still feels like a pile
-    const stagger = pitch * 0.2;
-    const rows = Math.ceil(SERVICES.length / 2);
-    height = Math.round(headerH + (rows - 1) * pitch + cardH + 40);
-    places = SERVICES.map((_, i) => {
-      const alone = i === SERVICES.length - 1 && SERVICES.length % 2 === 1;
-      const col = i % 2;
-      return {
-        left: alone ? freeX / 2 : col ? freeX * 0.97 : freeX * 0.03,
-        top: headerH + Math.floor(i / 2) * pitch + (col && !alone ? stagger : 0),
-      };
-    });
-  } else {
-    height = Math.round(cardH * 3.28); // 1400px on desktop, same proportion everywhere
-    const freeY = Math.max(0, height - cardH);
-    places = SPOTS.map((s) => ({ left: s.x * freeX, top: s.y * freeY }));
-  }
+	const places = narrow
+		? SERVICES.map((_, i) => {
+				const alone = i === SERVICES.length - 1 && SERVICES.length % 2 === 1
+				const col = i % 2
+				return {
+					left: alone ? freeX / 2 : col ? freeX * 0.97 : freeX * 0.03,
+					top: PHONE_HEADER + Math.floor(i / 2) * pitch + (col && !alone ? stagger : 0),
+				}
+			})
+		: SPOTS.map((s) => ({ left: s.x * freeX, top: s.y * freeY }))
 
-  const freeY = Math.max(0, height - cardH);
-  const spots = places.map(({ left, top }) => ({
-    left,
-    top,
-    // how far the card may travel from where it rests: never outside the section
-    constraints: {
-      left: -left,
-      right: freeX - left,
-      top: -top,
-      bottom: freeY - top,
-    },
-  }));
+	const spots = places.map(({ left, top }) => ({
+		left,
+		top,
+		// how far the card may travel from where it rests: never outside the section
+		constraints: { left: -left, right: freeX - left, top: -top, bottom: freeY - top },
+	}))
 
-  return { unit, cardW, cardH, height, spots };
+	return { unit, cardW, cardH, height, spots }
 }
 
-type Layout = ReturnType<typeof computeLayout>;
+type Layout = ReturnType<typeof computeLayout>
 
 /* ---------------- One slot in the pile ---------------- */
-// Memoized with stable props: grabbing a book changes only that book's z value,
-// so the other six slots (and their books) don't re-render at all.
+// Memoized with stable props: grabbing a book changes only that book's z, so the other six don't re-render.
 
 const CardSlot = memo(function CardSlot({
-  item,
-  i,
-  layout,
-  width,
-  z,
-  bookOpen,
-  openFit,
-  touch,
-  simple,
-  flat,
-  onFront,
-  onOpen,
-  onClose,
-  onFit,
+	item,
+	i,
+	layout,
+	width,
+	z,
+	bookOpen,
+	openFit,
+	touch,
+	simple,
+	flat,
+	onFront,
+	onOpen,
+	onClose,
+	onFit,
 }: {
-  item: Service;
-  i: number;
-  layout: Layout;
-  width: number;
-  z: number;
-  bookOpen: boolean;
-  openFit: Fit | null;
-  touch: boolean;
-  simple: boolean;
-  flat: boolean;
-  onFront: (i: number) => void;
-  onOpen: (i: number) => void;
-  onClose: () => void;
-  onFit: (f: Fit) => void;
+	item: Service
+	i: number
+	layout: Layout
+	width: number
+	z: number
+	bookOpen: boolean
+	openFit: Fit | null
+	touch: boolean
+	simple: boolean
+	flat: boolean
+	onFront: (i: number) => void
+	onOpen: (i: number) => void
+	onClose: () => void
+	onFit: (f: Fit) => void
 }) {
-  const spot = layout.spots[i];
+	const spot = layout.spots[i]
 
-  // closed: the card stays inside the section.
-  // open: the whole open book stays inside the section while you drag it.
-  const constraints = useMemo<Bounds>(() => {
-    if (!bookOpen || !openFit) return spot.constraints;
-    const margin = 16;
-    const hw = PAGE_W * openFit.scale;
-    const hh = (PAGE_H * openFit.scale) / 2;
-    const cx = spot.left + layout.cardW / 2;
-    const cy = spot.top + layout.cardH / 2;
-    return {
-      left: Math.min(0, margin + hw - cx - openFit.dx),
-      right: Math.max(0, width - margin - hw - cx - openFit.dx),
-      top: Math.min(0, margin + hh - cy - openFit.dy),
-      bottom: Math.max(0, layout.height - margin - hh - cy - openFit.dy),
-    };
-  }, [bookOpen, openFit, spot, layout, width]);
+	// closed: the card stays inside the section. open: the whole open book does.
+	const constraints = useMemo<Bounds>(() => {
+		if (!bookOpen || !openFit) return spot.constraints
+		const margin = 16
+		const hw = PAGE_W * openFit.scale
+		const hh = (PAGE_H * openFit.scale) / 2
+		const cx = spot.left + layout.cardW / 2
+		const cy = spot.top + layout.cardH / 2
+		return {
+			left: Math.min(0, margin + hw - cx - openFit.dx),
+			right: Math.max(0, width - margin - hw - cx - openFit.dx),
+			top: Math.min(0, margin + hh - cy - openFit.dy),
+			bottom: Math.max(0, layout.height - margin - hh - cy - openFit.dy),
+		}
+	}, [bookOpen, openFit, spot, layout, width])
 
-  const style = useMemo<React.CSSProperties>(
-    () => ({
-      left: spot.left,
-      top: spot.top,
-      width: layout.cardW,
-      height: layout.cardH,
-      zIndex: bookOpen ? 1_000_000 : z,
-    }),
-    [spot, layout, bookOpen, z],
-  );
+	const style = useMemo<CSSProperties>(
+		() => ({
+			left: spot.left,
+			top: spot.top,
+			width: layout.cardW,
+			height: layout.cardH,
+			zIndex: bookOpen ? 1_000_000 : z,
+		}),
+		[spot, layout, bookOpen, z]
+	)
 
-  const handleFront = useCallback(() => onFront(i), [onFront, i]);
+	const handleFront = useCallback(() => onFront(i), [onFront, i])
 
-  return (
-    <DraggableCardBody
-      unit={layout.unit}
-      touch={touch}
-      simple={simple}
-      flat={flat}
-      constraints={constraints}
-      onFront={handleFront}
-      style={style}
-      className={cn(
-        "absolute",
-        item.className,
-        !simple && "transition-[rotate] duration-500 motion-reduce:transition-none",
-        bookOpen && "rotate-0!",
-      )}
-    >
-      <ServiceCard
-        service={item}
-        index={i}
-        unit={layout.unit}
-        cardW={layout.cardW}
-        simple={simple}
-        open={bookOpen}
-        onOpen={onOpen}
-        onClose={onClose}
-        onFit={onFit}
-      />
-    </DraggableCardBody>
-  );
-});
+	return (
+		<DraggableCardBody
+			unit={layout.unit}
+			touch={touch}
+			simple={simple}
+			flat={flat}
+			constraints={constraints}
+			onFront={handleFront}
+			style={style}
+			className={cn(
+				"absolute",
+				item.className,
+				!simple && "transition-[rotate] duration-500 motion-reduce:transition-none",
+				bookOpen && "rotate-0!"
+			)}
+		>
+			<ServiceCard
+				service={item}
+				index={i}
+				unit={layout.unit}
+				cardW={layout.cardW}
+				simple={simple}
+				open={bookOpen}
+				onOpen={onOpen}
+				onClose={onClose}
+				onFit={onFit}
+			/>
+		</DraggableCardBody>
+	)
+})
 
-/* ---------------- Demo ---------------- */
+/* ---------------- Section ---------------- */
 
 export default function DraggableCardDemo() {
-  const [active, setActive] = useState<number | null>(null);
-  // per-card z-index: grabbing a card changes only its own value
-  const [zs, setZs] = useState<number[]>(() => SERVICES.map((_, i) => i + 1));
-  const [openFit, setOpenFit] = useState<Fit | null>(null);
-  const [width, setWidth] = useState(0);
-  const wrapRef = useRef<HTMLDivElement>(null);
+	const [active, setActive] = useState<number | null>(null)
+	// per-card z-index: grabbing a card changes only its own value
+	const [zs, setZs] = useState<number[]>(() => SERVICES.map((_, i) => i + 1))
+	const [openFit, setOpenFit] = useState<Fit | null>(null)
+	const [width, setWidth] = useState(0)
+	const wrapRef = useRef<HTMLDivElement>(null)
 
-  // small windows / landscape phones
-  const compact = useMediaQuery("(max-width: 819px), (max-height: 619px)");
-  // touch screens only drag sideways so the page can still be scrolled with a finger
-  const touch = useMediaQuery("(pointer: coarse)");
-  const weak = useWeakDevice();
-  const reduceMotion = useReducedMotion();
+	const compact = useMediaQuery("(max-width: 819px), (max-height: 619px)") // small windows / landscape phones
+	const touch = useMediaQuery("(pointer: coarse)") // touch screens only drag sideways so the page still scrolls
+	const weak = useWeakDevice()
+	const reduceMotion = useReducedMotion()
 
-  // LIGHT path for phones, tablets, touch screens, small windows and weak devices:
-  // flat covers, details sheet, static sky, no grain. Everything else gets the full 3D experience.
-  const simple = compact || touch || weak;
+	// LIGHT path: flat covers, details sheet, static sky, no grain. Everything else gets the full 3D experience.
+	const simple = compact || touch || weak
 
-  // after first paint (browser idle), switch on the grain textures: the books show up first, texture follows.
-  // never on the light path.
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    if (simple) {
-      el.removeAttribute("data-fx");
-      return;
-    }
-    const on = () => el.setAttribute("data-fx", "1");
-    const w = window as Window & {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-    if (w.requestIdleCallback) {
-      const id = w.requestIdleCallback(on, { timeout: 1200 });
-      return () => w.cancelIdleCallback?.(id);
-    }
-    const id = window.setTimeout(on, 300);
-    return () => clearTimeout(id);
-  }, [simple]);
+	// after first paint (browser idle) switch on the grain textures: books show first, texture follows. Never on the light path.
+	useEffect(() => {
+		const el = wrapRef.current
+		if (!el) return
+		if (simple) return el.removeAttribute("data-fx")
+		const on = () => el.setAttribute("data-fx", "1")
+		const w = window as Window & {
+			requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+			cancelIdleCallback?: (id: number) => void
+		}
+		if (w.requestIdleCallback) {
+			const id = w.requestIdleCallback(on, { timeout: 1200 })
+			return () => w.cancelIdleCallback?.(id)
+		}
+		const id = window.setTimeout(on, 300)
+		return () => clearTimeout(id)
+	}, [simple])
 
-  // measure the section width: first measure is immediate (before first paint), later resizes are debounced
-  useLayoutEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    let t = 0;
-    const update = () => {
-      const next = Math.round(el.clientWidth);
-      setWidth((prev) => (prev === next ? prev : next));
-    };
-    update();
-    const ro = new ResizeObserver(() => {
-      clearTimeout(t);
-      t = window.setTimeout(update, 120);
-    });
-    ro.observe(el);
-    return () => {
-      clearTimeout(t);
-      ro.disconnect();
-    };
-  }, []);
+	// measure the section width: first measure is immediate (before first paint), later resizes are debounced
+	useLayoutEffect(() => {
+		const el = wrapRef.current
+		if (!el) return
+		let t = 0
+		const update = () => setWidth(Math.round(el.clientWidth))
+		update()
+		const ro = new ResizeObserver(() => {
+			clearTimeout(t)
+			t = window.setTimeout(update, 120)
+		})
+		ro.observe(el)
+		return () => {
+			clearTimeout(t)
+			ro.disconnect()
+		}
+	}, [])
 
-  const layout = useMemo(() => (width ? computeLayout(width) : null), [width]);
+	const layout = useMemo(() => (width ? computeLayout(width) : null), [width])
 
-  // Esc closes the open book / sheet
-  useEffect(() => {
-    if (active === null) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setActive(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [active]);
+	// Esc closes the open book / sheet
+	useEffect(() => {
+		if (active === null) return
+		const onKey = (e: KeyboardEvent) => e.key === "Escape" && setActive(null)
+		window.addEventListener("keydown", onKey)
+		return () => window.removeEventListener("keydown", onKey)
+	}, [active])
 
-  // grabbed card goes on top of the pile (only that card's z changes)
-  const bringToFront = useCallback((i: number) => {
-    setZs((prev) => {
-      const max = Math.max(...prev);
-      return prev[i] === max ? prev : prev.map((z, k) => (k === i ? max + 1 : z));
-    });
-  }, []);
+	// grabbed card goes on top of the pile (only that card's z changes)
+	const bringToFront = useCallback((i: number) => {
+		setZs((prev) => {
+			const max = Math.max(...prev)
+			return prev[i] === max ? prev : prev.map((z, k) => (k === i ? max + 1 : z))
+		})
+	}, [])
 
-  // stable callbacks so the memoized cards don't re-render when another book opens
-  const handleOpen = useCallback(
-    (i: number) => {
-      bringToFront(i);
-      setOpenFit(null);
-      setActive(i);
-    },
-    [bringToFront],
-  );
-  const handleClose = useCallback(() => {
-    setActive(null);
-    setOpenFit(null);
-  }, []);
+	// stable callbacks so the memoized cards don't re-render when another book opens
+	const handleOpen = useCallback(
+		(i: number) => {
+			bringToFront(i)
+			setOpenFit(null)
+			setActive(i)
+		},
+		[bringToFront]
+	)
+	const handleClose = useCallback(() => {
+		setActive(null)
+		setOpenFit(null)
+	}, [])
 
-  return (
-    <MotionConfig reducedMotion="user">
-      <DraggableCardContainer
-        ref={wrapRef}
-        flat={simple}
-        className="relative flex w-full items-center justify-center overflow-clip"
-        style={{
-          height: layout ? layout.height : 1400,
-          // don't render the section at all until it is near the viewport
-          contentVisibility: "auto",
-          containIntrinsicSize: `auto ${layout ? layout.height : 1400}px`,
-        }}
-      >
-        <SpaceBackdrop lite={simple} />
-        {!simple && <style>{BOOK_CSS}</style>}
-        <SeoContent />
+	return (
+		<MotionConfig reducedMotion="user">
+			<DraggableCardContainer
+				ref={wrapRef}
+				flat={simple}
+				className="relative flex w-full items-center justify-center overflow-clip"
+				style={{
+					height: layout ? layout.height : 1400,
+					// don't render the section at all until it is near the viewport
+					contentVisibility: "auto",
+					containIntrinsicSize: `auto ${layout ? layout.height : 1400}px`,
+				}}
+			>
+				<SpaceBackdrop lite={simple} />
+				{!simple && <style>{BOOK_CSS}</style>}
+				<SeoContent />
 
-        {/* section heading + how-to line (sits behind the books so they can be dragged over it) */}
-        <header className="pointer-events-none absolute inset-x-0 top-0 z-0 px-6 pt-10 text-center md:pt-14">
-          <h2
-            className="font-serif text-[32px] leading-tight font-semibold tracking-wide md:text-5xl"
-            style={{
-              color: GOLD_TEXT,
-              textShadow: "0 2px 12px rgba(0,0,0,0.7), 0 0 28px rgba(232,196,118,0.25)",
-            }}
-          >
-            ShivayTech Services
-          </h2>
-          <div aria-hidden className="mx-auto mt-3 flex w-40 items-center gap-2 md:w-56">
-            <span
-              className="h-px flex-1"
-              style={{ background: `linear-gradient(90deg, transparent, rgba(${GOLD},0.85))` }}
-            />
-            <span className="h-1.5 w-1.5 rotate-45" style={{ background: `rgb(${GOLD})` }} />
-            <span
-              className="h-px flex-1"
-              style={{ background: `linear-gradient(270deg, transparent, rgba(${GOLD},0.85))` }}
-            />
-          </div>
-          <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-white/70 md:text-base">
-            {touch
-              ? "Swipe a book sideways to move it, then tap it to open and see what\u2019s included."
-              : "Drag the books around to explore, then click one to open it and see what\u2019s included."}
-          </p>
-        </header>
-        <p className="pointer-events-none absolute top-1/2 mx-auto max-w-sm -translate-y-3/4 px-6 text-center text-2xl font-black text-neutral-400 md:text-4xl dark:text-neutral-800">
-          What we do best.
-        </p>
+				{/* heading + how-to line (sits behind the books so they can be dragged over it) */}
+				<header className="pointer-events-none absolute inset-x-0 top-0 z-0 px-6 pt-10 text-center md:pt-14">
+					<h2
+						className="font-serif text-[32px] leading-tight font-semibold tracking-wide md:text-5xl"
+						style={{
+							color: GOLD_TEXT,
+							textShadow: "0 2px 12px rgba(0,0,0,0.7), 0 0 28px rgba(232,196,118,0.25)",
+						}}
+					>
+						ShivayTech Services
+					</h2>
+					<div aria-hidden className="mx-auto mt-3 flex w-40 items-center gap-2 md:w-56">
+						<span className="h-px flex-1" style={{ background: `linear-gradient(90deg, transparent, rgba(${GOLD},0.85))` }} />
+						<span className="h-1.5 w-1.5 rotate-45" style={{ background: `rgb(${GOLD})` }} />
+						<span className="h-px flex-1" style={{ background: `linear-gradient(270deg, transparent, rgba(${GOLD},0.85))` }} />
+					</div>
+					<p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-white/70 md:text-base">
+						{touch
+							? "Swipe a book sideways to move it, then tap it to open and see what\u2019s included."
+							: "Drag the books around to explore, then click one to open it and see what\u2019s included."}
+					</p>
+				</header>
+				<p className="pointer-events-none absolute top-1/2 mx-auto max-w-sm -translate-y-3/4 px-6 text-center text-2xl font-black text-neutral-400 md:text-4xl dark:text-neutral-800">
+					What we do best.
+				</p>
 
-        {layout &&
-          SERVICES.map((item, i) => {
-            const bookOpen = active === i && !simple;
-            return (
-              <CardSlot
-                key={item.title}
-                item={item}
-                i={i}
-                layout={layout}
-                width={width}
-                z={zs[i]}
-                bookOpen={bookOpen}
-                openFit={bookOpen ? openFit : null}
-                touch={touch}
-                simple={simple}
-                flat={bookOpen || !!reduceMotion}
-                onFront={bringToFront}
-                onOpen={handleOpen}
-                onClose={handleClose}
-                onFit={setOpenFit}
-              />
-            );
-          })}
-      </DraggableCardContainer>
+				{layout &&
+					SERVICES.map((item, i) => {
+						const bookOpen = active === i && !simple
+						return (
+							<CardSlot
+								key={item.title}
+								item={item}
+								i={i}
+								layout={layout}
+								width={width}
+								z={zs[i]}
+								bookOpen={bookOpen}
+								openFit={bookOpen ? openFit : null}
+								touch={touch}
+								simple={simple}
+								flat={bookOpen || !!reduceMotion}
+								onFront={bringToFront}
+								onOpen={handleOpen}
+								onClose={handleClose}
+								onFit={setOpenFit}
+							/>
+						)
+					})}
+			</DraggableCardContainer>
 
-      {active !== null && simple && (
-        <ServiceSheet
-          service={SERVICES[active]}
-          index={active}
-          onClose={handleClose}
-        />
-      )}
-    </MotionConfig>
-  );
+			{active !== null && simple && <ServiceSheet service={SERVICES[active]} index={active} onClose={handleClose} />}
+		</MotionConfig>
+	)
 }
